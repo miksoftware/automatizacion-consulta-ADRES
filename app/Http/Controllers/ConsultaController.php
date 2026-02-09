@@ -168,9 +168,9 @@ class ConsultaController extends Controller
                         'tiempo_restante' => $restantes > 0 ? $this->formatearTiempo($tiempoRestante) : 'Finalizando...',
                     ]);
 
-                    // Espera entre consultas
+                    // Espera breve entre consultas para no saturar ADRES
                     if ($index < $total - 1) {
-                        sleep(rand(2, 4));
+                        sleep(1);
                     }
                 }
 
