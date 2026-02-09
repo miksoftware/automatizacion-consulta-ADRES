@@ -171,6 +171,8 @@ class AdresScraperService
 
     /**
      * Realiza un intento individual de consulta de cédula.
+     * Estrategia: forzar que ADRES cargue resultados en el MISMO iframe
+     * en vez de abrir una pestaña nueva (que falla en headless Linux).
      */
     protected function intentarConsulta(string $cedula): array
     {
@@ -200,7 +202,6 @@ class AdresScraperService
             // Buscar el iframe correcto
             $iframes = $this->driver->findElements(WebDriverBy::cssSelector('iframe'));
             $iframeEncontrado = false;
-            Log::info("Encontrados " . count($iframes) . " iframes para {$cedula}");
 
             foreach ($iframes as $iframe) {
                 try {
@@ -209,7 +210,6 @@ class AdresScraperService
                     $inputs = $this->driver->findElements(WebDriverBy::id('txtNumDoc'));
                     if (count($inputs) > 0) {
                         $iframeEncontrado = true;
-                        Log::info("Iframe con formulario encontrado para {$cedula}");
                         break;
                     }
 
@@ -232,6 +232,35 @@ class AdresScraperService
                 WebDriverBy::id('txtNumDoc')
             ));
 
+            // === CLAVE: Modificar el formulario para que NO abra nueva pestaña ===
+            // Cambiar target del formulario y del botón para que cargue en _self
+            $this->driver->executeScript("
+                var forms = document.getElementsByTagName('form');
+                for (var i = 0; i < forms.length; i++) {
+                    forms[i].target = '_self';
+                }
+                var btn = document.getElementById('btnConsultar');
+                if (btn) {
+                    btn.removeAttribute('target');
+                    // Interceptar window.open para redirigir en la misma ventana
+                    window.__adresUrl = null;
+                    window.__origOpen = window.open;
+                    window.open = function(url, target, features) {
+                        if (url) {
+                            window.__adresUrl = url;
+                            window.location.href = url;
+                        }
+                        return null;
+                    };
+                }
+                // También interceptar a nivel de enlaces
+                var links = document.getElementsByTagName('a');
+                for (var j = 0; j < links.length; j++) {
+                    links[j].target = '_self';
+                }
+            ");
+            Log::info("Formulario modificado para cargar en _self para {$cedula}");
+
             // Limpiar campo e ingresar cédula
             $input = $this->driver->findElement(WebDriverBy::id('txtNumDoc'));
             $input->clear();
@@ -249,87 +278,22 @@ class AdresScraperService
                 sleep(1);
             }
 
-            Log::info("Cédula {$cedula} ingresada correctamente, haciendo click en consultar");
+            Log::info("Cédula {$cedula} ingresada, haciendo click en consultar");
 
-            // Guardar ventanas antes del click
+            // Guardar ventanas antes del click (por si acaso abre pestaña)
             $handlesBefore = $this->driver->getWindowHandles();
             $mainWindow = $this->driver->getWindowHandle();
-            Log::info("Ventanas antes del click: " . count($handlesBefore));
 
-            // Click en consultar - intentar de diferentes formas
+            // Click en consultar
             $btnConsultar = $this->driver->findElement(WebDriverBy::id('btnConsultar'));
             $this->driver->executeScript("arguments[0].click();", [$btnConsultar]);
             Log::info("Click ejecutado para {$cedula}");
 
-            // Esperar a que abra nueva pestaña — polling cada 2s, hasta 90s
-            $nuevaPestana = false;
-
-            for ($i = 0; $i < 45; $i++) {
-                sleep(2);
-                try {
-                    $handlesAfter = $this->driver->getWindowHandles();
-                    if (count($handlesAfter) > count($handlesBefore)) {
-                        $nuevaPestana = true;
-                        $tiempoEspera = ($i + 1) * 2;
-                        Log::info("Nueva pestaña detectada para {$cedula} (esperó {$tiempoEspera}s)");
-                        break;
-                    }
-
-                    // Cada 10 segundos, verificar si hay resultados en la misma página (iframe)
-                    if ($i > 0 && $i % 5 === 0) {
-                        try {
-                            $pageSource = $this->driver->getPageSource();
-                            if (str_contains($pageSource, 'GridViewBasica') || 
-                                str_contains($pageSource, 'GridViewAfiliacion')) {
-                                Log::info("Resultados encontrados en la misma página para {$cedula} (esperó " . (($i + 1) * 2) . "s)");
-                                $resultado = $this->extraerDatos($resultado);
-                                if (!empty($resultado['nombres']) || !empty($resultado['apellidos'])) {
-                                    $this->driver->switchTo()->defaultContent();
-                                    return $resultado;
-                                }
-                            }
-                            // Verificar errores en la página actual
-                            if (str_contains($pageSource, 'No se encontraron datos') ||
-                                str_contains($pageSource, 'no registra')) {
-                                $resultado['error'] = 'No se encontraron datos para esta cédula en ADRES';
-                                $this->driver->switchTo()->defaultContent();
-                                return $resultado;
-                            }
-                        } catch (\Exception $e) {
-                            // Ignorar
-                        }
-                    }
-                } catch (\Exception $e) {
-                    Log::warning("Error verificando pestañas para {$cedula}: " . $e->getMessage());
-                    continue;
-                }
-            }
-
-            if ($nuevaPestana) {
-                $resultado = $this->procesarPestanaResultados($resultado, $handlesBefore, $mainWindow, $cedula);
-            } else {
-                Log::warning("No se abrió nueva pestaña para {$cedula} después de 90s");
-
-                // Último intento: verificar si hay resultados en el iframe actual
-                try {
-                    $pageSource = $this->driver->getPageSource();
-                    Log::info("Contenido actual del iframe (primeros 500 chars): " . substr($pageSource, 0, 500));
-
-                    if (str_contains($pageSource, 'GridViewBasica')) {
-                        $resultado = $this->extraerDatos($resultado);
-                        if (!empty($resultado['nombres']) || !empty($resultado['apellidos'])) {
-                            $this->driver->switchTo()->defaultContent();
-                            return $resultado;
-                        }
-                    }
-                } catch (\Exception $e) {}
-
-                // Revisar si hay error en el formulario
-                $errorFormulario = $this->verificarErrorFormulario();
-                $resultado['error'] = $errorFormulario;
-
-                $this->driver->switchTo()->defaultContent();
-            }
+            // Esperar resultados — pueden aparecer de 3 formas:
+            // 1. En la misma página (gracias a target=_self)
+            // 2. En nueva pestaña (si el JS no fue interceptado)
+            // 3. Error en el formulario
+            $resultado = $this->esperarYProcesarResultados($resultado, $handlesBefore, $mainWindow, $cedula);
 
         } catch (\Exception $e) {
             $errorMsg = $e->getMessage();
@@ -347,7 +311,95 @@ class AdresScraperService
     }
 
     /**
-     * Procesa la pestaña de resultados con esperas dinámicas.
+     * Espera y procesa resultados de ADRES, sin importar si cargaron
+     * en la misma página o en una nueva pestaña.
+     */
+    protected function esperarYProcesarResultados(array $resultado, array $handlesBefore, string $mainWindow, string $cedula): array
+    {
+        $tiempoMax = 120; // 2 minutos máximo de espera total
+
+        for ($i = 0; $i < $tiempoMax; $i++) {
+            sleep(1);
+
+            try {
+                // Opción 1: ¿Se abrió nueva pestaña? (respaldo)
+                $handlesAfter = $this->driver->getWindowHandles();
+                if (count($handlesAfter) > count($handlesBefore)) {
+                    Log::info("Nueva pestaña detectada para {$cedula} (esperó {$i}s)");
+                    return $this->procesarPestanaResultados($resultado, $handlesBefore, $mainWindow, $cedula);
+                }
+
+                // Opción 2: ¿Resultados cargaron en la misma página?
+                // La página actual puede haber cambiado (navegación por target=_self)
+                $pageSource = $this->driver->getPageSource();
+
+                // ¿Tiene las tablas de resultados?
+                if (str_contains($pageSource, 'GridViewBasica')) {
+                    Log::info("Resultados cargados en misma página para {$cedula} (esperó {$i}s)");
+                    sleep(2); // Esperar que las tablas terminen de renderizar
+
+                    $resultado = $this->extraerDatos($resultado);
+
+                    if (!empty($resultado['nombres']) || !empty($resultado['apellidos'])) {
+                        Log::info("Datos extraídos para {$cedula}: {$resultado['nombres']} {$resultado['apellidos']}");
+                    } else {
+                        Log::warning("GridViewBasica encontrado pero sin nombres para {$cedula}");
+                        $resultado['error'] = 'No se pudieron leer los datos de la página';
+                    }
+
+                    $this->driver->switchTo()->defaultContent();
+                    return $resultado;
+                }
+
+                // ¿Tiene mensaje de error/no encontrado?
+                if (str_contains($pageSource, 'No se encontraron datos') ||
+                    str_contains($pageSource, 'no registra') ||
+                    str_contains($pageSource, 'documento no encontrado')) {
+                    Log::info("ADRES respondió: no se encontraron datos para {$cedula}");
+                    $resultado['error'] = 'No se encontraron datos para esta cédula en ADRES';
+                    $this->driver->switchTo()->defaultContent();
+                    return $resultado;
+                }
+
+                // Log de progreso cada 15 segundos
+                if ($i > 0 && $i % 15 === 0) {
+                    $titulo = '';
+                    try {
+                        $titulo = $this->driver->getTitle();
+                    } catch (\Exception $e) {}
+                    Log::info("Esperando resultados para {$cedula}... {$i}s (título: {$titulo})");
+                }
+
+            } catch (\Exception $e) {
+                // Si hay error de "no such window", el navegador cambió de página
+                $msg = $e->getMessage();
+                if (str_contains($msg, 'no such window') || str_contains($msg, 'target window')) {
+                    Log::info("Ventana cambió para {$cedula}, reconectando...");
+                    try {
+                        $handles = $this->driver->getWindowHandles();
+                        if (!empty($handles)) {
+                            $this->driver->switchTo()->window(end($handles));
+                            continue;
+                        }
+                    } catch (\Exception $e2) {}
+                }
+                continue;
+            }
+        }
+
+        // Timeout: no se obtuvo respuesta
+        Log::warning("Timeout de {$tiempoMax}s esperando resultados para {$cedula}");
+        $resultado['error'] = 'Timeout: la página no respondió a tiempo';
+
+        try {
+            $this->driver->switchTo()->defaultContent();
+        } catch (\Exception $e) {}
+
+        return $resultado;
+    }
+
+    /**
+     * Procesa resultados que aparecieron en una nueva pestaña.
      */
     protected function procesarPestanaResultados(array $resultado, array $handlesBefore, string $mainWindow, string $cedula): array
     {
@@ -369,10 +421,10 @@ class AdresScraperService
                 return $resultado;
             }
 
-            // Esperar a que la página de resultados cargue (hasta 60s)
+            // Esperar a que la página de resultados cargue (hasta 120s)
             $datosEncontrados = false;
 
-            for ($i = 0; $i < 60; $i++) {
+            for ($i = 0; $i < 120; $i++) {
                 sleep(1);
                 try {
                     $pageSource = $this->driver->getPageSource();
@@ -383,7 +435,6 @@ class AdresScraperService
                         break;
                     }
 
-                    // Verificar si la página muestra un mensaje de "no encontrado"
                     if (str_contains($pageSource, 'No se encontraron datos') ||
                         str_contains($pageSource, 'no registra') ||
                         str_contains($pageSource, 'No se encontr')) {
@@ -397,12 +448,9 @@ class AdresScraperService
             }
 
             if ($datosEncontrados) {
-                // Esperar a que las tablas terminen de renderizar
                 sleep(2);
-
                 $resultado = $this->extraerDatos($resultado);
 
-                // Verificar que realmente se extrajeron datos
                 if (empty($resultado['nombres']) && empty($resultado['apellidos'])) {
                     Log::warning("Cédula {$cedula}: GridViewBasica encontrado pero no se extrajeron nombres");
                     $resultado['error'] = 'No se pudieron leer los datos de la página';
@@ -421,8 +469,7 @@ class AdresScraperService
 
             try {
                 $this->cerrarPestanaYVolver($mainWindow);
-            } catch (\Exception $ex) {
-            }
+            } catch (\Exception $ex) {}
         }
 
         return $resultado;
@@ -434,19 +481,15 @@ class AdresScraperService
     protected function cerrarPestanaYVolver(string $mainWindow): void
     {
         try {
-            // Cerrar todas las pestañas excepto la principal
             $handles = $this->driver->getWindowHandles();
             foreach ($handles as $handle) {
                 if ($handle !== $mainWindow) {
                     try {
                         $this->driver->switchTo()->window($handle);
                         $this->driver->close();
-                    } catch (\Exception $e) {
-                        // Pestaña ya cerrada, ignorar
-                    }
+                    } catch (\Exception $e) {}
                 }
             }
-
             $this->driver->switchTo()->window($mainWindow);
             $this->driver->switchTo()->defaultContent();
         } catch (\Exception $e) {
