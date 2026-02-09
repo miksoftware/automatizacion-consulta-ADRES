@@ -39,7 +39,6 @@ class AdresScraperService
         
         $chromeArgs = [
             '--headless=new',
-            '--incognito',
             '--disable-gpu',
             '--no-sandbox',
             '--disable-dev-shm-usage',
@@ -56,7 +55,6 @@ class AdresScraperService
         if ($esProduccion) {
             $chromeArgs = array_merge($chromeArgs, [
                 '--disable-setuid-sandbox',
-                '--no-zygote',
                 '--disable-features=VizDisplayCompositor',
                 '--disable-crash-reporter',
                 '--disable-breakpad',
@@ -68,7 +66,6 @@ class AdresScraperService
                 '--mute-audio',
                 '--hide-scrollbars',
                 '--ignore-certificate-errors',
-                '--remote-debugging-port=0',
             ]);
             
             $userDataDir = '/var/www/automatizacion/storage/chrome';
@@ -83,6 +80,13 @@ class AdresScraperService
 
         $options->setExperimentalOption('excludeSwitches', ['enable-automation']);
         $options->setExperimentalOption('useAutomationExtension', false);
+
+        // Permitir popups/nuevas ventanas (crítico para que ADRES abra pestaña de resultados)
+        $prefs = [
+            'profile.default_content_setting_values.popups' => 0,
+            'profile.default_content_settings.popups' => 0,
+        ];
+        $options->setExperimentalOption('prefs', $prefs);
 
         $capabilities = DesiredCapabilities::chrome();
         $capabilities->setCapability(ChromeOptions::CAPABILITY, $options);
@@ -179,8 +183,9 @@ class AdresScraperService
         }
 
         try {
-            // Navegar al sitio (siempre recargar para estado limpio)
+            // Navegar al sitio
             $this->limpiarYNavegar();
+            Log::info("Página cargada para {$cedula}");
 
             $wait = new WebDriverWait($this->driver, 45);
 
@@ -189,12 +194,13 @@ class AdresScraperService
                 WebDriverBy::cssSelector('iframe')
             ));
 
-            // Espera para que el iframe cargue su contenido
-            sleep(2);
+            // Espera para que el iframe cargue su contenido interno
+            sleep(3);
 
             // Buscar el iframe correcto
             $iframes = $this->driver->findElements(WebDriverBy::cssSelector('iframe'));
             $iframeEncontrado = false;
+            Log::info("Encontrados " . count($iframes) . " iframes para {$cedula}");
 
             foreach ($iframes as $iframe) {
                 try {
@@ -203,6 +209,7 @@ class AdresScraperService
                     $inputs = $this->driver->findElements(WebDriverBy::id('txtNumDoc'));
                     if (count($inputs) > 0) {
                         $iframeEncontrado = true;
+                        Log::info("Iframe con formulario encontrado para {$cedula}");
                         break;
                     }
 
@@ -225,46 +232,75 @@ class AdresScraperService
                 WebDriverBy::id('txtNumDoc')
             ));
 
-            // Limpiar campo con JavaScript e ingresar cédula
+            // Limpiar campo e ingresar cédula
             $input = $this->driver->findElement(WebDriverBy::id('txtNumDoc'));
-            $this->driver->executeScript("arguments[0].value = '';", [$input]);
-            usleep(300000);
+            $input->clear();
+            sleep(1);
             $input->sendKeys($cedula);
-            usleep(300000);
+            sleep(1);
 
             // Verificar que la cédula se ingresó correctamente
             $valorIngresado = $input->getAttribute('value');
             if ($valorIngresado !== $cedula) {
                 Log::warning("Cédula mal ingresada. Esperado: {$cedula}, Ingresado: {$valorIngresado}. Corrigiendo...");
                 $this->driver->executeScript("arguments[0].value = '';", [$input]);
-                usleep(300000);
+                sleep(1);
                 $input->sendKeys($cedula);
-                usleep(300000);
+                sleep(1);
             }
 
-            Log::info("Consultando cédula: {$cedula}");
+            Log::info("Cédula {$cedula} ingresada correctamente, haciendo click en consultar");
 
             // Guardar ventanas antes del click
             $handlesBefore = $this->driver->getWindowHandles();
             $mainWindow = $this->driver->getWindowHandle();
+            Log::info("Ventanas antes del click: " . count($handlesBefore));
 
-            // Click en consultar
+            // Click en consultar - intentar de diferentes formas
             $btnConsultar = $this->driver->findElement(WebDriverBy::id('btnConsultar'));
             $this->driver->executeScript("arguments[0].click();", [$btnConsultar]);
+            Log::info("Click ejecutado para {$cedula}");
 
-            // Esperar a que abra nueva pestaña — polling cada 1s, hasta 60s
+            // Esperar a que abra nueva pestaña — polling cada 2s, hasta 90s
             $nuevaPestana = false;
 
-            for ($i = 0; $i < 60; $i++) {
-                sleep(1);
+            for ($i = 0; $i < 45; $i++) {
+                sleep(2);
                 try {
                     $handlesAfter = $this->driver->getWindowHandles();
                     if (count($handlesAfter) > count($handlesBefore)) {
                         $nuevaPestana = true;
-                        Log::info("Nueva pestaña detectada para {$cedula} (esperó {$i}s)");
+                        $tiempoEspera = ($i + 1) * 2;
+                        Log::info("Nueva pestaña detectada para {$cedula} (esperó {$tiempoEspera}s)");
                         break;
                     }
+
+                    // Cada 10 segundos, verificar si hay resultados en la misma página (iframe)
+                    if ($i > 0 && $i % 5 === 0) {
+                        try {
+                            $pageSource = $this->driver->getPageSource();
+                            if (str_contains($pageSource, 'GridViewBasica') || 
+                                str_contains($pageSource, 'GridViewAfiliacion')) {
+                                Log::info("Resultados encontrados en la misma página para {$cedula} (esperó " . (($i + 1) * 2) . "s)");
+                                $resultado = $this->extraerDatos($resultado);
+                                if (!empty($resultado['nombres']) || !empty($resultado['apellidos'])) {
+                                    $this->driver->switchTo()->defaultContent();
+                                    return $resultado;
+                                }
+                            }
+                            // Verificar errores en la página actual
+                            if (str_contains($pageSource, 'No se encontraron datos') ||
+                                str_contains($pageSource, 'no registra')) {
+                                $resultado['error'] = 'No se encontraron datos para esta cédula en ADRES';
+                                $this->driver->switchTo()->defaultContent();
+                                return $resultado;
+                            }
+                        } catch (\Exception $e) {
+                            // Ignorar
+                        }
+                    }
                 } catch (\Exception $e) {
+                    Log::warning("Error verificando pestañas para {$cedula}: " . $e->getMessage());
                     continue;
                 }
             }
@@ -272,7 +308,23 @@ class AdresScraperService
             if ($nuevaPestana) {
                 $resultado = $this->procesarPestanaResultados($resultado, $handlesBefore, $mainWindow, $cedula);
             } else {
-                // No se abrió pestaña — revisar si hay error en el formulario
+                Log::warning("No se abrió nueva pestaña para {$cedula} después de 90s");
+
+                // Último intento: verificar si hay resultados en el iframe actual
+                try {
+                    $pageSource = $this->driver->getPageSource();
+                    Log::info("Contenido actual del iframe (primeros 500 chars): " . substr($pageSource, 0, 500));
+
+                    if (str_contains($pageSource, 'GridViewBasica')) {
+                        $resultado = $this->extraerDatos($resultado);
+                        if (!empty($resultado['nombres']) || !empty($resultado['apellidos'])) {
+                            $this->driver->switchTo()->defaultContent();
+                            return $resultado;
+                        }
+                    }
+                } catch (\Exception $e) {}
+
+                // Revisar si hay error en el formulario
                 $errorFormulario = $this->verificarErrorFormulario();
                 $resultado['error'] = $errorFormulario;
 
@@ -317,10 +369,10 @@ class AdresScraperService
                 return $resultado;
             }
 
-            // Esperar a que la página de resultados cargue (hasta 45s)
+            // Esperar a que la página de resultados cargue (hasta 60s)
             $datosEncontrados = false;
 
-            for ($i = 0; $i < 45; $i++) {
+            for ($i = 0; $i < 60; $i++) {
                 sleep(1);
                 try {
                     $pageSource = $this->driver->getPageSource();
@@ -416,7 +468,6 @@ class AdresScraperService
                             $this->driver->switchTo()->window($h);
                             $this->driver->close();
                         } catch (\Exception $e) {
-                            // Pestaña ya cerrada, ignorar
                         }
                     }
                 }
@@ -426,14 +477,11 @@ class AdresScraperService
             // Volver al contexto principal
             $this->driver->switchTo()->defaultContent();
 
-            // Limpiar cookies y cache para evitar problemas de sesión
-            $this->driver->manage()->deleteAllCookies();
-
-            // Navegar a la página (esto resetea todo)
+            // Navegar a la página (NO borrar cookies, ADRES las necesita para sesión)
             $this->driver->get($this->baseUrl);
 
             // Esperar a que la página cargue completamente
-            $wait = new WebDriverWait($this->driver, 30);
+            $wait = new WebDriverWait($this->driver, 45);
             $wait->until(function ($driver) {
                 $readyState = $driver->executeScript('return document.readyState');
                 return $readyState === 'complete';
@@ -446,7 +494,7 @@ class AdresScraperService
             try {
                 $this->driver->get($this->baseUrl);
 
-                $wait = new WebDriverWait($this->driver, 30);
+                $wait = new WebDriverWait($this->driver, 45);
                 $wait->until(function ($driver) {
                     return $driver->executeScript('return document.readyState') === 'complete';
                 });
