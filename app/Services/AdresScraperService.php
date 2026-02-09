@@ -25,12 +25,6 @@ class AdresScraperService
      */
     protected int $esperaBaseReintento = 2;
 
-    /**
-     * Indica si la página ya fue cargada y el iframe está listo.
-     * Evita recargar la página completa para cada cédula.
-     */
-    protected bool $paginaLista = false;
-
     public function __construct()
     {
         $this->initDriver();
@@ -92,8 +86,7 @@ class AdresScraperService
 
         $capabilities = DesiredCapabilities::chrome();
         $capabilities->setCapability(ChromeOptions::CAPABILITY, $options);
-        // Estrategia de carga "eager" para no esperar recursos innecesarios (imágenes, CSS)
-        $capabilities->setCapability('pageLoadStrategy', 'eager');
+        $capabilities->setCapability('pageLoadStrategy', 'normal');
 
         $this->driver = RemoteWebDriver::create(
             'http://localhost:9515',
@@ -186,21 +179,18 @@ class AdresScraperService
         }
 
         try {
-            // Solo navegar si la página no está lista (primera vez o después de error)
-            if (!$this->paginaLista) {
-                $this->limpiarYNavegar();
-                $this->paginaLista = true;
-            }
+            // Navegar al sitio (siempre recargar para estado limpio)
+            $this->limpiarYNavegar();
 
-            // Asegurarse de estar en el contexto principal
-            $this->driver->switchTo()->defaultContent();
-
-            $wait = new WebDriverWait($this->driver, 30);
+            $wait = new WebDriverWait($this->driver, 45);
 
             // Esperar a que el iframe aparezca
             $wait->until(WebDriverExpectedCondition::presenceOfElementLocated(
                 WebDriverBy::cssSelector('iframe')
             ));
+
+            // Espera para que el iframe cargue su contenido
+            sleep(2);
 
             // Buscar el iframe correcto
             $iframes = $this->driver->findElements(WebDriverBy::cssSelector('iframe'));
@@ -225,28 +215,31 @@ class AdresScraperService
 
             if (!$iframeEncontrado) {
                 $resultado['error'] = 'No se encontró el formulario en la página';
-                $this->paginaLista = false;
                 $this->driver->switchTo()->defaultContent();
                 return $resultado;
             }
 
             // Esperar a que el campo de texto esté interactivo
-            $wait2 = new WebDriverWait($this->driver, 15);
+            $wait2 = new WebDriverWait($this->driver, 20);
             $wait2->until(WebDriverExpectedCondition::elementToBeClickable(
                 WebDriverBy::id('txtNumDoc')
             ));
 
-            // Limpiar campo con JavaScript (más rápido y confiable)
+            // Limpiar campo con JavaScript e ingresar cédula
             $input = $this->driver->findElement(WebDriverBy::id('txtNumDoc'));
             $this->driver->executeScript("arguments[0].value = '';", [$input]);
+            usleep(300000);
             $input->sendKeys($cedula);
+            usleep(300000);
 
             // Verificar que la cédula se ingresó correctamente
             $valorIngresado = $input->getAttribute('value');
             if ($valorIngresado !== $cedula) {
                 Log::warning("Cédula mal ingresada. Esperado: {$cedula}, Ingresado: {$valorIngresado}. Corrigiendo...");
                 $this->driver->executeScript("arguments[0].value = '';", [$input]);
+                usleep(300000);
                 $input->sendKeys($cedula);
+                usleep(300000);
             }
 
             Log::info("Consultando cédula: {$cedula}");
@@ -259,16 +252,16 @@ class AdresScraperService
             $btnConsultar = $this->driver->findElement(WebDriverBy::id('btnConsultar'));
             $this->driver->executeScript("arguments[0].click();", [$btnConsultar]);
 
-            // Esperar a que abra nueva pestaña — polling cada 0.5s, hasta 30s
+            // Esperar a que abra nueva pestaña — polling cada 1s, hasta 60s
             $nuevaPestana = false;
 
             for ($i = 0; $i < 60; $i++) {
-                usleep(500000); // 0.5 segundos
+                sleep(1);
                 try {
                     $handlesAfter = $this->driver->getWindowHandles();
                     if (count($handlesAfter) > count($handlesBefore)) {
                         $nuevaPestana = true;
-                        Log::info("Nueva pestaña detectada para {$cedula} (esperó " . ($i * 0.5) . "s)");
+                        Log::info("Nueva pestaña detectada para {$cedula} (esperó {$i}s)");
                         break;
                     }
                 } catch (\Exception $e) {
@@ -280,22 +273,15 @@ class AdresScraperService
                 $resultado = $this->procesarPestanaResultados($resultado, $handlesBefore, $mainWindow, $cedula);
             } else {
                 // No se abrió pestaña — revisar si hay error en el formulario
-                $resultado['error'] = $this->verificarErrorFormulario();
+                $errorFormulario = $this->verificarErrorFormulario();
+                $resultado['error'] = $errorFormulario;
 
-                if ($resultado['error'] === 'No se encontró información para esta cédula') {
-                    $resultado['error'] = 'Timeout: la página no respondió a tiempo';
-                }
-
-                // Marcar para recargar en el siguiente intento
-                $this->paginaLista = false;
                 $this->driver->switchTo()->defaultContent();
             }
 
         } catch (\Exception $e) {
             $errorMsg = $e->getMessage();
             Log::error("Error cédula {$cedula}: " . $errorMsg);
-
-            $this->paginaLista = false;
 
             if ($this->esErrorDeConexion($errorMsg)) {
                 $this->reiniciar();
@@ -331,17 +317,17 @@ class AdresScraperService
                 return $resultado;
             }
 
-            // Esperar dinámicamente a que la página de resultados cargue (hasta 30s)
+            // Esperar a que la página de resultados cargue (hasta 45s)
             $datosEncontrados = false;
 
-            for ($i = 0; $i < 60; $i++) {
-                usleep(500000); // 0.5 segundos
+            for ($i = 0; $i < 45; $i++) {
+                sleep(1);
                 try {
                     $pageSource = $this->driver->getPageSource();
 
                     if (str_contains($pageSource, 'GridViewBasica')) {
                         $datosEncontrados = true;
-                        Log::info("Datos encontrados para {$cedula} (esperó " . ($i * 0.5) . "s en resultados)");
+                        Log::info("Datos encontrados para {$cedula} (esperó {$i}s en resultados)");
                         break;
                     }
 
@@ -359,20 +345,20 @@ class AdresScraperService
             }
 
             if ($datosEncontrados) {
-                // Esperar breve a que las tablas terminen de renderizar
-                usleep(500000);
+                // Esperar a que las tablas terminen de renderizar
+                sleep(2);
 
                 $resultado = $this->extraerDatos($resultado);
 
                 // Verificar que realmente se extrajeron datos
                 if (empty($resultado['nombres']) && empty($resultado['apellidos'])) {
                     Log::warning("Cédula {$cedula}: GridViewBasica encontrado pero no se extrajeron nombres");
-                    $resultado['error'] = 'Página cargó pero no se pudieron leer los datos';
+                    $resultado['error'] = 'No se pudieron leer los datos de la página';
                 } else {
                     Log::info("Datos extraídos para {$cedula}: {$resultado['nombres']} {$resultado['apellidos']}");
                 }
             } else {
-                $resultado['error'] = 'Timeout: la página de resultados no cargó completamente';
+                $resultado['error'] = 'La página de resultados no cargó completamente';
             }
 
             $this->cerrarPestanaYVolver($mainWindow);
@@ -642,8 +628,7 @@ class AdresScraperService
         } catch (\Exception $e) {}
 
         $this->driver = null;
-        $this->paginaLista = false;
-        sleep(1);
+        sleep(2);
         $this->initDriver();
     }
 

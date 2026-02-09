@@ -17,7 +17,7 @@ class ConsultaController extends Controller
     /**
      * Segundos promedio por cédula (incluye reintentos posibles).
      */
-    private const SEGUNDOS_POR_CEDULA = 15;
+    private const SEGUNDOS_POR_CEDULA = 45;
 
     public function index()
     {

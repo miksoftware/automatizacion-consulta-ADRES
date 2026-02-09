@@ -19,6 +19,12 @@ class ResultadosExport implements FromArray, WithHeadings, WithStyles
     public function array(): array
     {
         return array_map(function ($item) {
+            // Limpiar mensaje de error: quitar prefijos como "Timeout:" o "Error:"
+            $error = $item['error'] ?? '';
+            if (!empty($error)) {
+                $error = preg_replace('/^(Timeout:\s*|Error:\s*)/i', '', $error);
+            }
+
             return [
                 $item['cedula'] ?? '',
                 $item['tipo_documento'] ?? 'CC',
@@ -33,7 +39,7 @@ class ResultadosExport implements FromArray, WithHeadings, WithStyles
                 $item['fecha_afiliacion'] ?? '',
                 $item['fecha_finalizacion'] ?? '',
                 $item['tipo_afiliado'] ?? '',
-                $item['error'] ?? '',
+                $error,
             ];
         }, $this->resultados);
     }
