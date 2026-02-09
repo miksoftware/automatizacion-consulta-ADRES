@@ -6,6 +6,7 @@ use App\Imports\CedulasImport;
 use App\Exports\ResultadosExport;
 use App\Models\Consulta;
 use App\Services\AdresScraperService;
+use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Storage;
 use Maatwebsite\Excel\Facades\Excel;
@@ -13,21 +14,78 @@ use Symfony\Component\HttpFoundation\StreamedResponse;
 
 class ConsultaController extends Controller
 {
+    /**
+     * Segundos promedio por cédula (incluye reintentos posibles).
+     */
+    private const SEGUNDOS_POR_CEDULA = 15;
+
     public function index()
     {
         $consultas = Consulta::orderBy('created_at', 'desc')->paginate(15);
         return view('consultas.index', compact('consultas'));
     }
 
-    public function procesar(Request $request): StreamedResponse
+    /**
+     * Pre-valida el archivo: lee cédulas y retorna conteo + tiempo estimado.
+     * El usuario decide si proceder antes de iniciar el proceso largo.
+     */
+    public function validar(Request $request): JsonResponse
     {
         $request->validate([
             'archivo' => 'required|file|mimes:xlsx,xls,csv|max:10240',
         ]);
 
         $archivo = $request->file('archivo');
-        $nombreOriginal = $archivo->getClientOriginalName();
         $ruta = $archivo->store('uploads', 'public');
+
+        try {
+            $import = new CedulasImport();
+            Excel::import($import, Storage::disk('public')->path($ruta));
+            $cedulas = $import->getCedulas();
+        } catch (\Exception $e) {
+            Storage::disk('public')->delete($ruta);
+            return response()->json([
+                'ok' => false,
+                'error' => 'No se pudo leer el archivo. Verifique el formato.',
+            ]);
+        }
+
+        if (empty($cedulas)) {
+            Storage::disk('public')->delete($ruta);
+            return response()->json([
+                'ok' => false,
+                'error' => 'No se encontraron cédulas numéricas válidas en el archivo.',
+            ]);
+        }
+
+        $total = count($cedulas);
+        $segundosEstimado = $total * self::SEGUNDOS_POR_CEDULA;
+
+        return response()->json([
+            'ok' => true,
+            'total_cedulas' => $total,
+            'tiempo_estimado_segundos' => $segundosEstimado,
+            'tiempo_estimado_texto' => $this->formatearTiempo($segundosEstimado),
+            'archivo_nombre' => $archivo->getClientOriginalName(),
+            'archivo_ruta' => $ruta,
+        ]);
+    }
+
+    public function procesar(Request $request): StreamedResponse
+    {
+        // Si viene de la pre-validación, usar la ruta ya guardada
+        $ruta = $request->input('archivo_ruta');
+        $nombreOriginal = $request->input('archivo_nombre', 'archivo.xlsx');
+
+        if (!$ruta || !Storage::disk('public')->exists($ruta)) {
+            // Fallback: subir archivo directamente
+            $request->validate([
+                'archivo' => 'required|file|mimes:xlsx,xls,csv|max:10240',
+            ]);
+            $archivo = $request->file('archivo');
+            $nombreOriginal = $archivo->getClientOriginalName();
+            $ruta = $archivo->store('uploads', 'public');
+        }
 
         // Leer cédulas
         $import = new CedulasImport();
@@ -37,7 +95,7 @@ class ConsultaController extends Controller
         if (empty($cedulas)) {
             Storage::disk('public')->delete($ruta);
             return response()->stream(function() {
-                echo "data: " . json_encode(['error' => 'No se encontraron cédulas válidas']) . "\n\n";
+                echo "data: " . json_encode(['tipo' => 'error', 'error' => 'No se encontraron cédulas válidas']) . "\n\n";
                 ob_flush();
                 flush();
             }, 200, [
@@ -58,63 +116,96 @@ class ConsultaController extends Controller
         return response()->stream(function() use ($cedulas, $consulta) {
             $scraper = null;
             $resultados = [];
+            $tiempoInicio = microtime(true);
 
             try {
+                // Enviar evento de inicio
+                $this->enviarSSE([
+                    'tipo' => 'inicio',
+                    'total' => count($cedulas),
+                    'tiempo_estimado' => $this->formatearTiempo(count($cedulas) * self::SEGUNDOS_POR_CEDULA),
+                ]);
+
                 $scraper = new AdresScraperService();
                 $total = count($cedulas);
+                $exitosas = 0;
+                $fallidas = 0;
 
                 foreach ($cedulas as $index => $cedula) {
+                    $tiempoInicioCedula = microtime(true);
+
                     $resultado = $scraper->consultarCedula($cedula);
                     $resultados[] = $resultado;
 
+                    $tiempoCedula = round(microtime(true) - $tiempoInicioCedula, 1);
+                    $tiempoTotal = microtime(true) - $tiempoInicio;
                     $procesadas = $index + 1;
                     $progreso = round(($procesadas / $total) * 100);
+                    $exito = empty($resultado['error']);
 
-                    echo "data: " . json_encode([
+                    if ($exito) $exitosas++;
+                    else $fallidas++;
+
+                    // Calcular tiempo restante basado en promedio real
+                    $promedioPorCedula = $tiempoTotal / $procesadas;
+                    $restantes = $total - $procesadas;
+                    $tiempoRestante = round($restantes * $promedioPorCedula);
+
+                    $this->enviarSSE([
+                        'tipo' => 'progreso',
                         'progreso' => $progreso,
                         'procesadas' => $procesadas,
                         'total' => $total,
-                        'cedula_actual' => $cedula,
-                        'exito' => empty($resultado['error']),
-                    ]) . "\n\n";
-                    ob_flush();
-                    flush();
+                        'exitosas' => $exitosas,
+                        'fallidas' => $fallidas,
+                        'cedula' => $cedula,
+                        'exito' => $exito,
+                        'nombre' => $exito ? trim(($resultado['nombres'] ?? '') . ' ' . ($resultado['apellidos'] ?? '')) : null,
+                        'eps' => $exito ? ($resultado['entidad_eps'] ?? '') : null,
+                        'error_detalle' => !$exito ? ($resultado['error'] ?? 'Error desconocido') : null,
+                        'tiempo_cedula' => $tiempoCedula,
+                        'tiempo_transcurrido' => $this->formatearTiempo(round($tiempoTotal)),
+                        'tiempo_restante' => $restantes > 0 ? $this->formatearTiempo($tiempoRestante) : 'Finalizando...',
+                    ]);
 
+                    // Espera entre consultas
                     if ($index < $total - 1) {
-                        sleep(1);
+                        sleep(rand(2, 4));
                     }
                 }
 
-                // Guardar resultados
+                // Generar archivo de salida
                 $nombreSalida = 'resultados_' . $consulta->id . '_' . now()->format('Ymd_His') . '.xlsx';
                 $rutaSalida = 'exports/' . $nombreSalida;
                 Excel::store(new ResultadosExport($resultados), $rutaSalida, 'public');
+
+                $tiempoFinal = round(microtime(true) - $tiempoInicio);
 
                 $consulta->update([
                     'estado' => 'completado',
                     'archivo_salida' => $rutaSalida,
                     'procesadas' => count($cedulas),
-                    'exitosas' => count(array_filter($resultados, fn($r) => empty($r['error']))),
-                    'fallidas' => count(array_filter($resultados, fn($r) => !empty($r['error']))),
+                    'exitosas' => $exitosas,
+                    'fallidas' => $fallidas,
                     'fecha_generacion' => now(),
                 ]);
 
-                echo "data: " . json_encode([
-                    'completado' => true,
+                $this->enviarSSE([
+                    'tipo' => 'completado',
                     'consulta_id' => $consulta->id,
-                    'mensaje' => '¡Archivo listo para descargar!',
-                ]) . "\n\n";
-                ob_flush();
-                flush();
+                    'exitosas' => $exitosas,
+                    'fallidas' => $fallidas,
+                    'total' => $total,
+                    'tiempo_total' => $this->formatearTiempo($tiempoFinal),
+                ]);
 
             } catch (\Exception $e) {
                 $consulta->update(['estado' => 'error', 'mensaje_error' => $e->getMessage()]);
-                
-                echo "data: " . json_encode([
+
+                $this->enviarSSE([
+                    'tipo' => 'error',
                     'error' => 'Error: ' . $e->getMessage(),
-                ]) . "\n\n";
-                ob_flush();
-                flush();
+                ]);
             } finally {
                 if ($scraper) {
                     $scraper->cerrar();
@@ -184,5 +275,36 @@ class ConsultaController extends Controller
         $consulta->delete();
 
         return redirect()->route('consultas.index')->with('success', 'Registro eliminado.');
+    }
+
+    /**
+     * Envía un evento SSE al navegador.
+     */
+    protected function enviarSSE(array $data): void
+    {
+        echo "data: " . json_encode($data) . "\n\n";
+        if (ob_get_level()) ob_flush();
+        flush();
+    }
+
+    /**
+     * Formatea segundos a texto legible (ej: "2 min 30 seg", "1 hora 5 min").
+     */
+    protected function formatearTiempo(int $segundos): string
+    {
+        if ($segundos < 60) {
+            return $segundos . ' seg';
+        }
+
+        $horas = intdiv($segundos, 3600);
+        $minutos = intdiv($segundos % 3600, 60);
+        $segs = $segundos % 60;
+
+        $partes = [];
+        if ($horas > 0) $partes[] = $horas . ' hora' . ($horas > 1 ? 's' : '');
+        if ($minutos > 0) $partes[] = $minutos . ' min';
+        if ($segs > 0 && $horas === 0) $partes[] = $segs . ' seg';
+
+        return implode(' ', $partes);
     }
 }

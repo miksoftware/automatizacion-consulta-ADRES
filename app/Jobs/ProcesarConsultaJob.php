@@ -18,7 +18,7 @@ class ProcesarConsultaJob implements ShouldQueue
 {
     use Dispatchable, InteractsWithQueue, Queueable, SerializesModels;
 
-    public int $timeout = 3600; // 1 hora máximo
+    public int $timeout = 7200; // 2 horas máximo (reintentos toman más tiempo)
     public int $tries = 1;
 
     public function __construct(
@@ -55,9 +55,9 @@ class ProcesarConsultaJob implements ShouldQueue
                     'fallidas' => $consulta->fallidas + (!empty($resultado['error']) ? 1 : 0),
                 ]);
 
-                // Delay entre consultas para no saturar el servidor
+                // Delay entre consultas para no saturar al servidor de ADRES
                 if ($index < count($this->cedulas) - 1) {
-                    sleep(rand(1, 2));
+                    sleep(rand(2, 4));
                 }
             }
 
