@@ -33,12 +33,16 @@ class AdresScraperService
     protected function initDriver(): void
     {
         $options = new ChromeOptions();
-        $options->addArguments([
+        $chromeArgs = [
             '--headless=new',
             '--incognito',
             '--disable-gpu',
             '--no-sandbox',
             '--disable-dev-shm-usage',
+            '--disable-setuid-sandbox',
+            '--single-process',
+            '--no-zygote',
+            '--disable-features=VizDisplayCompositor',
             '--window-size=1920,1080',
             '--disable-blink-features=AutomationControlled',
             '--disable-extensions',
@@ -46,7 +50,18 @@ class AdresScraperService
             '--disable-infobars',
             '--disable-notifications',
             '--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36',
-        ]);
+        ];
+
+        $userDataDir = '/var/www/automatizacion/storage/chrome';
+        if (!is_dir($userDataDir)) {
+            $userDataDir = sys_get_temp_dir() . DIRECTORY_SEPARATOR . 'adres_chrome';
+        }
+        if (!is_dir($userDataDir)) {
+            @mkdir($userDataDir, 0775, true);
+        }
+        $chromeArgs[] = '--user-data-dir=' . $userDataDir;
+
+        $options->addArguments($chromeArgs);
 
         $options->setExperimentalOption('excludeSwitches', ['enable-automation']);
         $options->setExperimentalOption('useAutomationExtension', false);
