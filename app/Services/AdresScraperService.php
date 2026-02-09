@@ -33,16 +33,16 @@ class AdresScraperService
     protected function initDriver(): void
     {
         $options = new ChromeOptions();
+        
+        // Detectar entorno: producción (Linux) vs desarrollo (Windows)
+        $esProduccion = PHP_OS_FAMILY === 'Linux';
+        
         $chromeArgs = [
             '--headless=new',
             '--incognito',
             '--disable-gpu',
             '--no-sandbox',
             '--disable-dev-shm-usage',
-            '--disable-setuid-sandbox',
-            '--single-process',
-            '--no-zygote',
-            '--disable-features=VizDisplayCompositor',
             '--window-size=1920,1080',
             '--disable-blink-features=AutomationControlled',
             '--disable-extensions',
@@ -52,14 +52,32 @@ class AdresScraperService
             '--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36',
         ];
 
-        $userDataDir = '/var/www/automatizacion/storage/chrome';
-        if (!is_dir($userDataDir)) {
-            $userDataDir = sys_get_temp_dir() . DIRECTORY_SEPARATOR . 'adres_chrome';
+        // Flags adicionales para servidores Linux (VPS)
+        if ($esProduccion) {
+            $chromeArgs = array_merge($chromeArgs, [
+                '--disable-setuid-sandbox',
+                '--no-zygote',
+                '--disable-features=VizDisplayCompositor',
+                '--disable-crash-reporter',
+                '--disable-breakpad',
+                '--disable-background-networking',
+                '--disable-sync',
+                '--disable-translate',
+                '--disable-default-apps',
+                '--no-first-run',
+                '--mute-audio',
+                '--hide-scrollbars',
+                '--ignore-certificate-errors',
+                '--remote-debugging-port=0',
+            ]);
+            
+            $userDataDir = '/var/www/automatizacion/storage/chrome';
+            if (!is_dir($userDataDir)) {
+                @mkdir($userDataDir, 0775, true);
+            }
+            $chromeArgs[] = '--user-data-dir=' . $userDataDir;
+            $chromeArgs[] = '--crash-dumps-dir=/tmp';
         }
-        if (!is_dir($userDataDir)) {
-            @mkdir($userDataDir, 0775, true);
-        }
-        $chromeArgs[] = '--user-data-dir=' . $userDataDir;
 
         $options->addArguments($chromeArgs);
 
