@@ -23,7 +23,7 @@ class AdresScraperService
     /**
      * Segundos de espera base entre reintentos (se multiplica por el intento).
      */
-    protected int $esperaBaseReintento = 3;
+    protected int $esperaBaseReintento = 2;
 
     public function __construct()
     {
@@ -191,7 +191,7 @@ class AdresScraperService
             ));
 
             // Espera dinámica para que el iframe cargue su contenido
-            $this->esperarConSeguridad(3);
+            $this->esperarConSeguridad(1);
 
             // Buscar el iframe correcto (puede haber varios)
             $iframes = $this->driver->findElements(WebDriverBy::cssSelector('iframe'));
@@ -223,37 +223,30 @@ class AdresScraperService
             }
 
             // Esperar a que el campo de texto esté interactivo
-            $wait2 = new WebDriverWait($this->driver, 20);
+            $wait2 = new WebDriverWait($this->driver, 10);
             $wait2->until(WebDriverExpectedCondition::elementToBeClickable(
                 WebDriverBy::id('txtNumDoc')
             ));
 
-            $this->esperarConSeguridad(1);
-
             // Limpiar campo e ingresar cédula con precaución
             $input = $this->driver->findElement(WebDriverBy::id('txtNumDoc'));
             $input->clear();
-            $this->esperarConSeguridad(1);
 
             // Verificar que el campo se limpió correctamente
             $valorActual = $input->getAttribute('value');
             if (!empty($valorActual)) {
                 // Limpiar con JavaScript si clear() no funcionó
                 $this->driver->executeScript("arguments[0].value = '';", [$input]);
-                $this->esperarConSeguridad(1);
             }
 
             $input->sendKeys($cedula);
-            $this->esperarConSeguridad(1);
 
             // Verificar que la cédula se ingresó correctamente
             $valorIngresado = $input->getAttribute('value');
             if ($valorIngresado !== $cedula) {
                 Log::warning("Cédula mal ingresada. Esperado: {$cedula}, Ingresado: {$valorIngresado}. Reintentando ingreso...");
                 $this->driver->executeScript("arguments[0].value = '';", [$input]);
-                $this->esperarConSeguridad(1);
                 $input->sendKeys($cedula);
-                $this->esperarConSeguridad(1);
             }
 
             Log::info("Consultando cédula: {$cedula}");
@@ -266,17 +259,17 @@ class AdresScraperService
             $btnConsultar = $this->driver->findElement(WebDriverBy::id('btnConsultar'));
             $this->driver->executeScript("arguments[0].click();", [$btnConsultar]);
 
-            // Esperar a que abra nueva pestaña — espera dinámica más larga
+            // Esperar a que abra nueva pestaña — espera dinámica
             $nuevaPestana = false;
-            $maxEsperaTab = 20; // hasta 20 segundos esperando la pestaña
+            $maxEsperaTab = 12; // hasta 12 segundos esperando la pestaña
 
-            for ($i = 0; $i < $maxEsperaTab; $i++) {
-                sleep(1);
+            for ($i = 0; $i < $maxEsperaTab * 2; $i++) {
+                usleep(500000); // 0.5 segundos
                 try {
                     $handlesAfter = $this->driver->getWindowHandles();
                     if (count($handlesAfter) > count($handlesBefore)) {
                         $nuevaPestana = true;
-                        Log::info("Nueva pestaña detectada para {$cedula} (esperó {$i}s)");
+                        Log::info("Nueva pestaña detectada para {$cedula} (esperó " . ($i * 0.5) . "s)");
                         break;
                     }
                 } catch (\Exception $e) {
@@ -339,16 +332,16 @@ class AdresScraperService
 
             // Esperar dinámicamente a que la página de resultados cargue
             $datosEncontrados = false;
-            $maxEsperaPagina = 15; // hasta 15 segundos esperando contenido
+            $maxEsperaPagina = 10; // hasta 10 segundos esperando contenido
 
-            for ($i = 0; $i < $maxEsperaPagina; $i++) {
-                sleep(1);
+            for ($i = 0; $i < $maxEsperaPagina * 2; $i++) {
+                usleep(500000); // 0.5 segundos
                 try {
                     $pageSource = $this->driver->getPageSource();
 
                     if (str_contains($pageSource, 'GridViewBasica')) {
                         $datosEncontrados = true;
-                        Log::info("Datos encontrados para {$cedula} (esperó {$i}s en resultados)");
+                        Log::info("Datos encontrados para {$cedula} (esperó " . ($i * 0.5) . "s en resultados)");
                         break;
                     }
 
@@ -368,11 +361,11 @@ class AdresScraperService
 
             if ($datosEncontrados) {
                 // Esperar un momento adicional para que las tablas terminen de renderizar
-                $this->esperarConSeguridad(2);
+                $this->esperarConSeguridad(1);
 
                 // Usar WebDriverWait para esperar la tabla
                 try {
-                    $waitResultados = new WebDriverWait($this->driver, 10);
+                    $waitResultados = new WebDriverWait($this->driver, 5);
                     $waitResultados->until(WebDriverExpectedCondition::presenceOfElementLocated(
                         WebDriverBy::id('GridViewBasica')
                     ));
@@ -569,9 +562,6 @@ class AdresScraperService
             $tablasBasica = $this->driver->findElements(WebDriverBy::id('GridViewBasica'));
 
             if (count($tablasBasica) > 0) {
-                // Esperar a que la tabla tenga contenido
-                $this->esperarConSeguridad(1);
-
                 $rows = $tablasBasica[0]->findElements(WebDriverBy::tagName('tr'));
 
                 foreach ($rows as $row) {
@@ -602,8 +592,6 @@ class AdresScraperService
             $tablasAfiliacion = $this->driver->findElements(WebDriverBy::id('GridViewAfiliacion'));
 
             if (count($tablasAfiliacion) > 0) {
-                $this->esperarConSeguridad(1);
-
                 $rows = $tablasAfiliacion[0]->findElements(WebDriverBy::tagName('tr'));
 
                 if (count($rows) >= 2) {
@@ -667,7 +655,7 @@ class AdresScraperService
         } catch (\Exception $e) {}
 
         $this->driver = null;
-        sleep(3);
+        sleep(1);
         $this->initDriver();
     }
 
