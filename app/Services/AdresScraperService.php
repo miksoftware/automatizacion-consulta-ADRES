@@ -171,8 +171,8 @@ class AdresScraperService
 
     /**
      * Realiza un intento individual de consulta de cédula.
-     * Estrategia: forzar que ADRES cargue resultados en el MISMO iframe
-     * en vez de abrir una pestaña nueva (que falla en headless Linux).
+     * Estrategia: usar fetch() para enviar el formulario por HTTP y recibir
+     * el HTML de respuesta directamente, sin depender de nuevas pestañas.
      */
     protected function intentarConsulta(string $cedula): array
     {
@@ -232,35 +232,6 @@ class AdresScraperService
                 WebDriverBy::id('txtNumDoc')
             ));
 
-            // === CLAVE: Modificar el formulario para que NO abra nueva pestaña ===
-            // Cambiar target del formulario y del botón para que cargue en _self
-            $this->driver->executeScript("
-                var forms = document.getElementsByTagName('form');
-                for (var i = 0; i < forms.length; i++) {
-                    forms[i].target = '_self';
-                }
-                var btn = document.getElementById('btnConsultar');
-                if (btn) {
-                    btn.removeAttribute('target');
-                    // Interceptar window.open para redirigir en la misma ventana
-                    window.__adresUrl = null;
-                    window.__origOpen = window.open;
-                    window.open = function(url, target, features) {
-                        if (url) {
-                            window.__adresUrl = url;
-                            window.location.href = url;
-                        }
-                        return null;
-                    };
-                }
-                // También interceptar a nivel de enlaces
-                var links = document.getElementsByTagName('a');
-                for (var j = 0; j < links.length; j++) {
-                    links[j].target = '_self';
-                }
-            ");
-            Log::info("Formulario modificado para cargar en _self para {$cedula}");
-
             // Limpiar campo e ingresar cédula
             $input = $this->driver->findElement(WebDriverBy::id('txtNumDoc'));
             $input->clear();
@@ -278,22 +249,125 @@ class AdresScraperService
                 sleep(1);
             }
 
-            Log::info("Cédula {$cedula} ingresada, haciendo click en consultar");
+            Log::info("Cédula {$cedula} ingresada, enviando formulario vía fetch");
 
-            // Guardar ventanas antes del click (por si acaso abre pestaña)
-            $handlesBefore = $this->driver->getWindowHandles();
-            $mainWindow = $this->driver->getWindowHandle();
+            // Configurar timeout para scripts asíncronos (3 minutos)
+            $this->driver->manage()->timeouts()->setScriptTimeout(180);
 
-            // Click en consultar
-            $btnConsultar = $this->driver->findElement(WebDriverBy::id('btnConsultar'));
-            $this->driver->executeScript("arguments[0].click();", [$btnConsultar]);
-            Log::info("Click ejecutado para {$cedula}");
+            // === ESTRATEGIA PRINCIPAL: Enviar formulario vía fetch() ===
+            // Esto evita completamente la necesidad de abrir nuevas pestañas.
+            // Recopila todos los campos del formulario ASP.NET (__VIEWSTATE, etc.)
+            // y hace un POST directo, recibiendo el HTML de respuesta.
+            $fetchResult = $this->driver->executeAsyncScript("
+                var callback = arguments[arguments.length - 1];
+                try {
+                    var form = document.forms[0];
+                    if (!form) { callback('FETCH_ERROR:No se encontró formulario'); return; }
 
-            // Esperar resultados — pueden aparecer de 3 formas:
-            // 1. En la misma página (gracias a target=_self)
-            // 2. En nueva pestaña (si el JS no fue interceptado)
-            // 3. Error en el formulario
-            $resultado = $this->esperarYProcesarResultados($resultado, $handlesBefore, $mainWindow, $cedula);
+                    // Recopilar todos los campos del formulario
+                    var params = new URLSearchParams();
+                    var inputs = form.querySelectorAll('input, select, textarea');
+                    for (var i = 0; i < inputs.length; i++) {
+                        var el = inputs[i];
+                        if (!el.name || el.disabled) continue;
+                        if (el.type === 'checkbox' || el.type === 'radio') {
+                            if (el.checked) params.append(el.name, el.value);
+                        } else {
+                            params.append(el.name, el.value);
+                        }
+                    }
+                    // Agregar el botón como si se hiciera click
+                    params.append('btnConsultar', 'Consultar');
+
+                    var actionUrl = form.action || window.location.href;
+
+                    fetch(actionUrl, {
+                        method: 'POST',
+                        body: params.toString(),
+                        credentials: 'same-origin',
+                        redirect: 'follow',
+                        headers: {
+                            'Content-Type': 'application/x-www-form-urlencoded'
+                        }
+                    })
+                    .then(function(response) {
+                        if (!response.ok) {
+                            return 'FETCH_ERROR:HTTP ' + response.status;
+                        }
+                        return response.text();
+                    })
+                    .then(function(html) {
+                        callback(html);
+                    })
+                    .catch(function(err) {
+                        callback('FETCH_ERROR:' + err.message);
+                    });
+                } catch(e) {
+                    callback('FETCH_ERROR:' + e.message);
+                }
+            ");
+
+            // Si fetch falló, intentar método clásico con click
+            if (is_string($fetchResult) && str_starts_with($fetchResult, 'FETCH_ERROR:')) {
+                $errorFetch = substr($fetchResult, 12);
+                Log::warning("Fetch falló para {$cedula}: {$errorFetch}. Intentando con click...");
+                return $this->intentarConsultaConClick($cedula, $resultado);
+            }
+
+            if (empty($fetchResult) || !is_string($fetchResult)) {
+                Log::warning("Fetch devolvió respuesta vacía para {$cedula}. Intentando con click...");
+                return $this->intentarConsultaConClick($cedula, $resultado);
+            }
+
+            $bytesRecibidos = strlen($fetchResult);
+            Log::info("Respuesta fetch recibida para {$cedula} ({$bytesRecibidos} bytes)");
+
+            // Inyectar el HTML de respuesta en el documento actual para poder usar extractores
+            $this->driver->executeScript("
+                document.open();
+                document.write(arguments[0]);
+                document.close();
+            ", [$fetchResult]);
+            sleep(2);
+
+            // Ahora extraer datos del DOM inyectado
+            $pageSource = $this->driver->getPageSource();
+
+            if (str_contains($pageSource, 'GridViewBasica')) {
+                Log::info("GridViewBasica encontrado en respuesta fetch para {$cedula}");
+                $resultado = $this->extraerDatos($resultado);
+
+                if (!empty($resultado['nombres']) || !empty($resultado['apellidos'])) {
+                    Log::info("Datos extraídos para {$cedula}: {$resultado['nombres']} {$resultado['apellidos']}");
+                } else {
+                    Log::warning("GridViewBasica presente pero sin datos legibles para {$cedula}");
+                    // Intentar extraer de HTML crudo como respaldo
+                    $resultado = $this->extraerDatosDeHtml($fetchResult, $resultado);
+                    if (!empty($resultado['nombres']) || !empty($resultado['apellidos'])) {
+                        Log::info("Datos extraídos de HTML crudo para {$cedula}: {$resultado['nombres']} {$resultado['apellidos']}");
+                    } else {
+                        $resultado['error'] = 'No se pudieron leer los datos de la página';
+                    }
+                }
+            } elseif (str_contains($fetchResult, 'GridViewBasica')) {
+                // El document.write falló pero el HTML sí tiene datos
+                Log::info("document.write no funcionó, extrayendo de HTML crudo para {$cedula}");
+                $resultado = $this->extraerDatosDeHtml($fetchResult, $resultado);
+                if (!empty($resultado['nombres']) || !empty($resultado['apellidos'])) {
+                    Log::info("Datos extraídos de HTML crudo para {$cedula}: {$resultado['nombres']} {$resultado['apellidos']}");
+                } else {
+                    $resultado['error'] = 'No se pudieron leer los datos de la página';
+                }
+            } elseif (str_contains($fetchResult, 'No se encontraron datos') ||
+                      str_contains($fetchResult, 'no registra') ||
+                      str_contains($fetchResult, 'documento no encontrado')) {
+                $resultado['error'] = 'No se encontraron datos para esta cédula en ADRES';
+            } else {
+                Log::warning("Respuesta fetch no reconocida para {$cedula} (primeros 500 chars): " . substr($fetchResult, 0, 500));
+                $resultado['error'] = 'Respuesta no reconocida del servidor';
+            }
+
+            $this->driver->switchTo()->defaultContent();
 
         } catch (\Exception $e) {
             $errorMsg = $e->getMessage();
@@ -311,89 +385,112 @@ class AdresScraperService
     }
 
     /**
-     * Espera y procesa resultados de ADRES, sin importar si cargaron
-     * en la misma página o en una nueva pestaña.
+     * Método de respaldo: intenta consulta haciendo click en el botón
+     * y esperando nueva pestaña (funciona en Windows, intermitente en Linux).
      */
-    protected function esperarYProcesarResultados(array $resultado, array $handlesBefore, string $mainWindow, string $cedula): array
+    protected function intentarConsultaConClick(string $cedula, array $resultado): array
     {
-        $tiempoMax = 120; // 2 minutos máximo de espera total
+        try {
+            Log::info("Usando método click para {$cedula}");
 
-        for ($i = 0; $i < $tiempoMax; $i++) {
-            sleep(1);
+            // Guardar ventanas antes del click
+            $handlesBefore = $this->driver->getWindowHandles();
+            $mainWindow = $this->driver->getWindowHandle();
 
-            try {
-                // Opción 1: ¿Se abrió nueva pestaña? (respaldo)
-                $handlesAfter = $this->driver->getWindowHandles();
-                if (count($handlesAfter) > count($handlesBefore)) {
-                    Log::info("Nueva pestaña detectada para {$cedula} (esperó {$i}s)");
-                    return $this->procesarPestanaResultados($resultado, $handlesBefore, $mainWindow, $cedula);
-                }
+            // Click en consultar
+            $btnConsultar = $this->driver->findElement(WebDriverBy::id('btnConsultar'));
+            $this->driver->executeScript("arguments[0].click();", [$btnConsultar]);
+            Log::info("Click ejecutado para {$cedula}");
 
-                // Opción 2: ¿Resultados cargaron en la misma página?
-                // La página actual puede haber cambiado (navegación por target=_self)
-                $pageSource = $this->driver->getPageSource();
-
-                // ¿Tiene las tablas de resultados?
-                if (str_contains($pageSource, 'GridViewBasica')) {
-                    Log::info("Resultados cargados en misma página para {$cedula} (esperó {$i}s)");
-                    sleep(2); // Esperar que las tablas terminen de renderizar
-
-                    $resultado = $this->extraerDatos($resultado);
-
-                    if (!empty($resultado['nombres']) || !empty($resultado['apellidos'])) {
-                        Log::info("Datos extraídos para {$cedula}: {$resultado['nombres']} {$resultado['apellidos']}");
-                    } else {
-                        Log::warning("GridViewBasica encontrado pero sin nombres para {$cedula}");
-                        $resultado['error'] = 'No se pudieron leer los datos de la página';
+            // Esperar nueva pestaña (hasta 90s)
+            for ($i = 0; $i < 45; $i++) {
+                sleep(2);
+                try {
+                    $handlesAfter = $this->driver->getWindowHandles();
+                    if (count($handlesAfter) > count($handlesBefore)) {
+                        Log::info("Nueva pestaña detectada para {$cedula} (esperó " . (($i + 1) * 2) . "s)");
+                        return $this->procesarPestanaResultados($resultado, $handlesBefore, $mainWindow, $cedula);
                     }
-
-                    $this->driver->switchTo()->defaultContent();
-                    return $resultado;
+                } catch (\Exception $e) {
+                    continue;
                 }
-
-                // ¿Tiene mensaje de error/no encontrado?
-                if (str_contains($pageSource, 'No se encontraron datos') ||
-                    str_contains($pageSource, 'no registra') ||
-                    str_contains($pageSource, 'documento no encontrado')) {
-                    Log::info("ADRES respondió: no se encontraron datos para {$cedula}");
-                    $resultado['error'] = 'No se encontraron datos para esta cédula en ADRES';
-                    $this->driver->switchTo()->defaultContent();
-                    return $resultado;
-                }
-
-                // Log de progreso cada 15 segundos
-                if ($i > 0 && $i % 15 === 0) {
-                    $titulo = '';
-                    try {
-                        $titulo = $this->driver->getTitle();
-                    } catch (\Exception $e) {}
-                    Log::info("Esperando resultados para {$cedula}... {$i}s (título: {$titulo})");
-                }
-
-            } catch (\Exception $e) {
-                // Si hay error de "no such window", el navegador cambió de página
-                $msg = $e->getMessage();
-                if (str_contains($msg, 'no such window') || str_contains($msg, 'target window')) {
-                    Log::info("Ventana cambió para {$cedula}, reconectando...");
-                    try {
-                        $handles = $this->driver->getWindowHandles();
-                        if (!empty($handles)) {
-                            $this->driver->switchTo()->window(end($handles));
-                            continue;
-                        }
-                    } catch (\Exception $e2) {}
-                }
-                continue;
             }
+
+            Log::warning("No se abrió nueva pestaña para {$cedula} (método click)");
+            $resultado['error'] = 'No se abrió pestaña de resultados';
+            $this->driver->switchTo()->defaultContent();
+
+        } catch (\Exception $e) {
+            Log::error("Error en método click para {$cedula}: " . $e->getMessage());
+            $resultado['error'] = 'Error: ' . substr($e->getMessage(), 0, 100);
         }
 
-        // Timeout: no se obtuvo respuesta
-        Log::warning("Timeout de {$tiempoMax}s esperando resultados para {$cedula}");
-        $resultado['error'] = 'Timeout: la página no respondió a tiempo';
+        return $resultado;
+    }
 
+    /**
+     * Extrae datos de tablas ADRES directamente del HTML crudo usando DOMDocument.
+     * Respaldo cuando document.write no funciona correctamente.
+     */
+    protected function extraerDatosDeHtml(string $html, array $resultado): array
+    {
         try {
-            $this->driver->switchTo()->defaultContent();
-        } catch (\Exception $e) {}
+            $doc = new \DOMDocument();
+            @$doc->loadHTML($html, LIBXML_NOERROR | LIBXML_NOWARNING);
+            $xpath = new \DOMXPath($doc);
+
+            // Tabla 1: GridViewBasica
+            $tabla = $doc->getElementById('GridViewBasica');
+            if ($tabla) {
+                $rows = $tabla->getElementsByTagName('tr');
+                foreach ($rows as $row) {
+                    $cells = $row->getElementsByTagName('td');
+                    if ($cells->length >= 2) {
+                        $columna = mb_strtoupper(trim($cells->item(0)->textContent));
+                        $dato = trim($cells->item(1)->textContent);
+
+                        if (str_contains($columna, 'TIPO DE IDENT') || str_contains($columna, 'TIPO IDENT')) {
+                            $resultado['tipo_documento'] = $dato;
+                        } elseif (str_contains($columna, 'PRIMER NOMBRE') || (str_contains($columna, 'NOMBRES') && !str_contains($columna, 'APELLIDO'))) {
+                            $resultado['nombres'] = $dato;
+                        } elseif (str_contains($columna, 'APELLIDOS') || str_contains($columna, 'PRIMER APELLIDO')) {
+                            $resultado['apellidos'] = $dato;
+                        } elseif (str_contains($columna, 'NACIMIENTO')) {
+                            $resultado['fecha_nacimiento'] = $dato;
+                        } elseif (str_contains($columna, 'DEPARTAMENTO')) {
+                            $resultado['departamento'] = $dato;
+                        } elseif (str_contains($columna, 'MUNICIPIO')) {
+                            $resultado['municipio'] = $dato;
+                        }
+                    }
+                }
+            }
+
+            // Tabla 2: GridViewAfiliacion
+            $tabla2 = $doc->getElementById('GridViewAfiliacion');
+            if ($tabla2) {
+                $rows = $tabla2->getElementsByTagName('tr');
+                $rowIndex = 0;
+                foreach ($rows as $row) {
+                    if ($rowIndex === 1) { // Segunda fila (datos)
+                        $cells = $row->getElementsByTagName('td');
+                        if ($cells->length >= 6) {
+                            $resultado['estado'] = trim($cells->item(0)->textContent);
+                            $resultado['entidad_eps'] = trim($cells->item(1)->textContent);
+                            $resultado['regimen'] = trim($cells->item(2)->textContent);
+                            $resultado['fecha_afiliacion'] = trim($cells->item(3)->textContent);
+                            $resultado['fecha_finalizacion'] = trim($cells->item(4)->textContent);
+                            $resultado['tipo_afiliado'] = trim($cells->item(5)->textContent);
+                        }
+                        break;
+                    }
+                    $rowIndex++;
+                }
+            }
+
+        } catch (\Exception $e) {
+            Log::error("Error extrayendo datos de HTML crudo: " . $e->getMessage());
+        }
 
         return $resultado;
     }
