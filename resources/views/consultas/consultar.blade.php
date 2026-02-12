@@ -16,14 +16,24 @@
     <div class="container mx-auto px-4 py-8 max-w-5xl">
         
         <!-- Header con menú -->
+        <!-- Header con menú -->
         <div class="bg-gradient-to-r from-blue-600 to-blue-800 rounded-lg shadow-lg p-6 mb-6 text-white">
             <div class="flex items-center justify-between">
                 <div>
                     <h1 class="text-2xl font-bold flex items-center gap-3">
                         <i class="fas fa-hospital-user"></i>
-                        Sistema de Consulta Masiva  del Sistema de Seguridad Social
+                        Sistema de Consulta Masiva del Sistema de Seguridad Social
                     </h1>
                     <p class="text-blue-100 mt-1">Consulta información de afiliación al sistema de salud colombiano</p>
+                </div>
+                <div class="flex items-center gap-3">
+                    <span class="text-blue-200 text-sm"><i class="fas fa-user mr-1"></i>{{ Auth::user()->name }}</span>
+                    <form method="POST" action="{{ route('logout') }}" class="inline">
+                        @csrf
+                        <button type="submit" class="text-blue-200 hover:text-white text-sm transition" title="Cerrar sesión">
+                            <i class="fas fa-sign-out-alt"></i>
+                        </button>
+                    </form>
                 </div>
             </div>
             <!-- Menú de navegación -->
@@ -34,6 +44,11 @@
                 <a href="{{ route('consultas.consultar') }}" class="text-white bg-blue-700 transition flex items-center gap-2 text-sm font-medium px-3 py-1 rounded">
                     <i class="fas fa-search"></i> Consultar Cédula
                 </a>
+                @if(Auth::user()->is_admin)
+                <a href="{{ route('usuarios.index') }}" class="text-blue-200 hover:text-white transition flex items-center gap-2 text-sm font-medium px-3 py-1 rounded hover:bg-blue-700">
+                    <i class="fas fa-users-cog"></i> Usuarios
+                </a>
+                @endif
             </div>
         </div>
 
@@ -73,7 +88,7 @@
 
         <!-- Footer -->
         <div class="text-center text-gray-500 text-sm mt-6">
-            <p>Sistema de consulta al portal ADRES Colombia</p>
+            <p>Sistema de Consulta Masiva  del Sistema de Seguridad Social</p>
         </div>
     </div>
 
