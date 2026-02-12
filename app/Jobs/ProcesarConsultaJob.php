@@ -4,6 +4,7 @@ namespace App\Jobs;
 
 use App\Exports\ResultadosExport;
 use App\Models\Consulta;
+use App\Models\Resultado;
 use App\Services\AdresScraperService;
 use Illuminate\Bus\Queueable;
 use Illuminate\Contracts\Queue\ShouldQueue;
@@ -57,6 +58,27 @@ class ProcesarConsultaJob implements ShouldQueue
                 } else {
                     $fallidas++;
                 }
+
+                // Guardar resultado individual en BD
+                Resultado::create([
+                    'consulta_id' => $this->consultaId,
+                    'cedula' => $resultado['cedula'] ?? $cedula,
+                    'tipo_documento' => $resultado['tipo_documento'] ?? null,
+                    'nombres' => $resultado['nombres'] ?? null,
+                    'apellidos' => $resultado['apellidos'] ?? null,
+                    'fecha_nacimiento' => $resultado['fecha_nacimiento'] ?? null,
+                    'departamento' => $resultado['departamento'] ?? null,
+                    'municipio' => $resultado['municipio'] ?? null,
+                    'estado_afiliacion' => $resultado['estado'] ?? null,
+                    'entidad_eps' => $resultado['entidad_eps'] ?? null,
+                    'regimen' => $resultado['regimen'] ?? null,
+                    'fecha_afiliacion' => $resultado['fecha_afiliacion'] ?? null,
+                    'fecha_finalizacion' => $resultado['fecha_finalizacion'] ?? null,
+                    'tipo_afiliado' => $resultado['tipo_afiliado'] ?? null,
+                    'error' => $resultado['error'] ?? null,
+                    'exitosa' => $esExitosa,
+                    'consultado_en' => now(),
+                ]);
 
                 // Actualizar progreso en BD después de cada cédula
                 $consulta->update([

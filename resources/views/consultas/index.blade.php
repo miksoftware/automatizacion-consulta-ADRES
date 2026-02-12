@@ -21,13 +21,26 @@
 <body class="bg-gray-100 min-h-screen">
     <div class="container mx-auto px-4 py-8 max-w-6xl">
         
-        <!-- Header -->
+        <!-- Header con menú -->
         <div class="bg-gradient-to-r from-blue-600 to-blue-800 rounded-lg shadow-lg p-6 mb-6 text-white">
-            <h1 class="text-2xl font-bold flex items-center gap-3">
-                <i class="fas fa-hospital-user"></i>
-                Sistema de Consulta Masiva ADRES
-            </h1>
-            <p class="text-blue-100 mt-1">Consulta información de afiliación al sistema de salud colombiano</p>
+            <div class="flex items-center justify-between">
+                <div>
+                    <h1 class="text-2xl font-bold flex items-center gap-3">
+                        <i class="fas fa-hospital-user"></i>
+                        Sistema de Consulta Masiva  del Sistema de Seguridad Social
+                    </h1>
+                    <p class="text-blue-100 mt-1">Consulta información de afiliación al sistema de salud colombiano</p>
+                </div>
+            </div>
+            <!-- Menú de navegación -->
+            <div class="flex gap-4 mt-4 border-t border-blue-500 pt-3">
+                <a href="{{ route('consultas.index') }}" class="text-white bg-blue-700 transition flex items-center gap-2 text-sm font-medium px-3 py-1 rounded">
+                    <i class="fas fa-upload"></i> Consulta Masiva
+                </a>
+                <a href="{{ route('consultas.consultar') }}" class="text-blue-200 hover:text-white transition flex items-center gap-2 text-sm font-medium px-3 py-1 rounded hover:bg-blue-700">
+                    <i class="fas fa-search"></i> Consultar Cédula
+                </a>
+            </div>
         </div>
 
         <div class="grid grid-cols-1 lg:grid-cols-3 gap-6">

@@ -5,6 +5,7 @@ namespace App\Http\Controllers;
 use App\Imports\CedulasImport;
 use App\Exports\ResultadosExport;
 use App\Models\Consulta;
+use App\Models\Resultado;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Storage;
@@ -238,6 +239,60 @@ class ConsultaController extends Controller
         $consulta->delete();
 
         return redirect()->route('consultas.index')->with('success', 'Registro eliminado.');
+    }
+
+    /**
+     * Vista dedicada para consultar cédula.
+     */
+    public function consultar()
+    {
+        return view('consultas.consultar');
+    }
+
+    /**
+     * Buscar historial de una cédula específica.
+     */
+    public function buscarCedula(Request $request): JsonResponse
+    {
+        $request->validate([
+            'cedula' => 'required|string|min:3|max:20',
+        ]);
+
+        $cedula = trim($request->input('cedula'));
+
+        $resultados = Resultado::where('cedula', $cedula)
+            ->orderBy('consultado_en', 'desc')
+            ->get()
+            ->map(function ($r) {
+                return [
+                    'id' => $r->id,
+                    'consulta_id' => $r->consulta_id,
+                    'cedula' => $r->cedula,
+                    'tipo_documento' => $r->tipo_documento,
+                    'nombres' => $r->nombres,
+                    'apellidos' => $r->apellidos,
+                    'fecha_nacimiento' => $r->fecha_nacimiento,
+                    'departamento' => $r->departamento,
+                    'municipio' => $r->municipio,
+                    'estado_afiliacion' => $r->estado_afiliacion,
+                    'entidad_eps' => $r->entidad_eps,
+                    'regimen' => $r->regimen,
+                    'fecha_afiliacion' => $r->fecha_afiliacion,
+                    'fecha_finalizacion' => $r->fecha_finalizacion,
+                    'tipo_afiliado' => $r->tipo_afiliado,
+                    'error' => $r->error,
+                    'exitosa' => $r->exitosa,
+                    'consultado_en' => $r->consultado_en->format('d/m/Y H:i'),
+                    'archivo_origen' => $r->consulta->archivo_entrada ?? '—',
+                ];
+            });
+
+        return response()->json([
+            'ok' => true,
+            'cedula' => $cedula,
+            'total_consultas' => $resultados->count(),
+            'resultados' => $resultados,
+        ]);
     }
 
     /**

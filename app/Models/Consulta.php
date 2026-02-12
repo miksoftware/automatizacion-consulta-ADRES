@@ -3,6 +3,7 @@
 namespace App\Models;
 
 use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\Eloquent\Relations\HasMany;
 
 class Consulta extends Model
 {
@@ -34,5 +35,10 @@ class Consulta extends Model
         return $this->total_cedulas > 0 
             ? round(($this->procesadas / $this->total_cedulas) * 100) 
             : 0;
+    }
+
+    public function resultados(): HasMany
+    {
+        return $this->hasMany(Resultado::class);
     }
 }
