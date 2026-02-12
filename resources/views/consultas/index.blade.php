@@ -126,39 +126,21 @@
                             </div>
                         </div>
 
-                        <!-- Tiempos -->
-                        <div class="grid grid-cols-2 gap-3 mb-4">
-                            <div class="bg-gray-50 rounded-lg p-3 text-center">
-                                <div class="text-xs text-gray-500 mb-1">
-                                    <i class="fas fa-clock mr-1"></i>Transcurrido
+                        <!-- Info -->
+                        <div class="bg-blue-50 rounded-lg p-3 mb-4 text-sm">
+                            <div class="flex items-start gap-2">
+                                <i class="fas fa-info-circle text-blue-600 mt-0.5"></i>
+                                <div>
+                                    <p class="font-medium text-blue-800">Procesando en segundo plano</p>
+                                    <p class="text-blue-700 mt-1">Puedes cerrar esta página. El proceso continuará automáticamente. Vuelve cuando quieras para ver el progreso.</p>
                                 </div>
-                                <div class="font-bold text-gray-700" id="tiempo-transcurrido">0 seg</div>
-                            </div>
-                            <div class="bg-blue-50 rounded-lg p-3 text-center">
-                                <div class="text-xs text-blue-600 mb-1">
-                                    <i class="fas fa-hourglass-half mr-1"></i>Restante
-                                </div>
-                                <div class="font-bold text-blue-700" id="tiempo-restante">Calculando...</div>
                             </div>
                         </div>
 
-                        <!-- Cédula actual -->
+                        <!-- Estado del proceso -->
                         <div class="bg-gray-50 rounded-lg p-3 mb-4">
-                            <div class="text-xs text-gray-500 mb-1">Consultando ahora:</div>
-                            <div class="font-mono font-bold text-gray-800 pulse-soft" id="cedula-actual">—</div>
-                        </div>
-
-                        <!-- Log en tiempo real -->
-                        <div>
-                            <div class="flex items-center justify-between mb-2">
-                                <span class="text-xs font-medium text-gray-600 uppercase tracking-wider">Resultados en vivo</span>
-                                <span class="text-xs text-gray-400" id="log-count">0 registros</span>
-                            </div>
-                            <div class="log-scroll border border-gray-200 rounded-lg" id="log-container">
-                                <div class="p-3 text-center text-sm text-gray-400" id="log-vacio">
-                                    <i class="fas fa-spinner fa-spin mr-1"></i>Esperando resultados...
-                                </div>
-                            </div>
+                            <div class="text-xs text-gray-500 mb-1">Estado actual:</div>
+                            <div class="font-bold text-gray-800 pulse-soft" id="estado-actual">Enviado a la cola...</div>
                         </div>
                     </div>
 
@@ -322,6 +304,13 @@
                                                         <i class="fas fa-file-csv"></i>
                                                     </a>
                                                 @endif
+                                                @if(in_array($c->estado, ['error', 'procesando']))
+                                                    <button onclick="reprocesar({{ $c->id }})" 
+                                                       class="p-2 text-gray-600 hover:text-orange-600 hover:bg-orange-50 rounded" 
+                                                       title="Reprocesar">
+                                                        <i class="fas fa-redo"></i>
+                                                    </button>
+                                                @endif
                                                 <form action="{{ route('consultas.eliminar', $c) }}" method="POST" class="inline" onsubmit="return confirm('¿Eliminar este registro?')">
                                                     @csrf
                                                     @method('DELETE')
@@ -356,7 +345,8 @@
         // ─── Estado global ──────────────────────────────────────────────
         let archivoRuta = null;
         let archivoNombre = null;
-        let logEntries = 0;
+        let pollingInterval = null;
+        let consultaActualId = null;
 
         const csrf = document.querySelector('meta[name="csrf-token"]').content;
 
@@ -440,11 +430,10 @@
             mostrarPaso('subir');
         }
 
-        // ─── PASO 3: Procesamiento con SSE ──────────────────────────────
+        // ─── PASO 3: Procesamiento con Polling ─────────────────────────
         async function iniciarProceso() {
             mostrarPaso('progreso');
-            logEntries = 0;
-            document.getElementById('log-container').innerHTML = '<div class="p-3 text-center text-sm text-gray-400" id="log-vacio"><i class="fas fa-spinner fa-spin mr-1"></i>Esperando resultados...</div>';
+            document.getElementById('estado-actual').textContent = 'Enviando a la cola de procesamiento...';
 
             const formData = new FormData();
             formData.append('_token', csrf);
@@ -458,110 +447,77 @@
                     headers: { 'X-CSRF-TOKEN': csrf }
                 });
 
-                const reader = response.body.getReader();
-                const decoder = new TextDecoder();
-                let buffer = '';
+                const data = await response.json();
 
-                while (true) {
-                    const { value, done } = await reader.read();
-                    if (done) break;
-
-                    buffer += decoder.decode(value, { stream: true });
-                    const lines = buffer.split('\n');
-                    buffer = lines.pop(); // Guardar línea incompleta
-
-                    for (const line of lines) {
-                        if (line.startsWith('data: ')) {
-                            try {
-                                const data = JSON.parse(line.substring(6));
-                                procesarEvento(data);
-                            } catch (e) {
-                                // JSON mal formado parcial, ignorar
-                            }
-                        }
-                    }
+                if (!data.ok) {
+                    mostrarError(data.error || 'Error al enviar el archivo.');
+                    return;
                 }
+
+                consultaActualId = data.consulta_id;
+                document.getElementById('estado-actual').textContent = 'En cola de procesamiento...';
+                document.getElementById('contador-progreso').textContent = `0 / ${data.total}`;
+
+                // Iniciar polling cada 3 segundos
+                iniciarPolling(data.consulta_id);
+
             } catch (err) {
-                mostrarError('La conexión se interrumpió: ' + err.message);
+                mostrarError('Error de conexión: ' + err.message);
             }
         }
 
-        function procesarEvento(data) {
-            switch (data.tipo) {
-                case 'inicio':
-                    document.getElementById('texto-progreso').textContent = 'Conectando con ADRES...';
-                    document.getElementById('tiempo-restante').textContent = data.tiempo_estimado;
-                    break;
+        function iniciarPolling(consultaId) {
+            // Limpiar polling anterior si existe
+            if (pollingInterval) clearInterval(pollingInterval);
 
-                case 'progreso':
+            pollingInterval = setInterval(async () => {
+                try {
+                    const response = await fetch(`/progreso/${consultaId}`);
+                    const data = await response.json();
+
                     actualizarProgreso(data);
-                    agregarLog(data);
-                    break;
 
-                case 'completado':
-                    mostrarResultadoFinal(data);
-                    break;
-
-                case 'error':
-                    mostrarError(data.error);
-                    break;
-            }
+                    if (data.estado === 'completado') {
+                        clearInterval(pollingInterval);
+                        pollingInterval = null;
+                        mostrarResultadoFinal(data);
+                    } else if (data.estado === 'error') {
+                        clearInterval(pollingInterval);
+                        pollingInterval = null;
+                        mostrarError(data.mensaje_error || 'Error durante el procesamiento.');
+                    }
+                } catch (err) {
+                    // No detener polling por errores de red temporales
+                    console.warn('Error polling:', err);
+                }
+            }, 3000);
         }
 
         function actualizarProgreso(data) {
+            const progreso = data.progreso || 0;
+
             // Barra
-            document.getElementById('barra-progreso').style.width = data.progreso + '%';
-            document.getElementById('porcentaje-progreso').textContent = data.progreso + '%';
+            document.getElementById('barra-progreso').style.width = progreso + '%';
+            document.getElementById('porcentaje-progreso').textContent = progreso + '%';
 
             // Texto
-            document.getElementById('texto-progreso').textContent = `Procesando cédula ${data.procesadas}/${data.total}`;
+            if (data.procesadas > 0) {
+                document.getElementById('texto-progreso').textContent = `Procesando cédula ${data.procesadas}/${data.total}`;
+                document.getElementById('estado-actual').textContent = `Procesando... ${data.procesadas} de ${data.total} cédulas`;
+            } else if (data.estado === 'procesando') {
+                document.getElementById('texto-progreso').textContent = 'Conectando con ADRES...';
+                document.getElementById('estado-actual').textContent = 'Iniciando scraper...';
+            } else {
+                document.getElementById('texto-progreso').textContent = 'En cola de procesamiento...';
+                document.getElementById('estado-actual').textContent = 'Esperando turno en la cola...';
+            }
+
             document.getElementById('contador-progreso').textContent = `${data.procesadas} / ${data.total} cédulas`;
 
             // Exitosas / fallidas
             document.getElementById('exitosas-fallidas').innerHTML =
                 `<span class="text-green-600">${data.exitosas} <i class="fas fa-check"></i></span> ` +
                 `<span class="text-red-500 ml-1">${data.fallidas} <i class="fas fa-times"></i></span>`;
-
-            // Tiempos
-            document.getElementById('tiempo-transcurrido').textContent = data.tiempo_transcurrido;
-            document.getElementById('tiempo-restante').textContent = data.tiempo_restante;
-
-            // Cédula actual
-            document.getElementById('cedula-actual').textContent = data.cedula;
-        }
-
-        function agregarLog(data) {
-            // Quitar mensaje de vacío
-            const vacio = document.getElementById('log-vacio');
-            if (vacio) vacio.remove();
-
-            logEntries++;
-            document.getElementById('log-count').textContent = logEntries + ' registros';
-
-            const logContainer = document.getElementById('log-container');
-            const entry = document.createElement('div');
-            entry.className = 'flex items-center gap-2 px-3 py-2 text-xs border-b border-gray-100 fade-in ' +
-                (data.exito ? 'bg-green-50' : 'bg-red-50');
-
-            if (data.exito) {
-                entry.innerHTML = `
-                    <i class="fas fa-check-circle text-green-500 flex-shrink-0"></i>
-                    <span class="font-mono text-gray-700 flex-shrink-0">${data.cedula}</span>
-                    <span class="text-green-700 truncate">${data.nombre || '—'}</span>
-                    <span class="text-gray-400 ml-auto flex-shrink-0">${data.tiempo_cedula}s</span>
-                `;
-            } else {
-                entry.innerHTML = `
-                    <i class="fas fa-times-circle text-red-400 flex-shrink-0"></i>
-                    <span class="font-mono text-gray-700 flex-shrink-0">${data.cedula}</span>
-                    <span class="text-red-600 truncate">${data.error_detalle || 'Error'}</span>
-                    <span class="text-gray-400 ml-auto flex-shrink-0">${data.tiempo_cedula}s</span>
-                `;
-            }
-
-            logContainer.appendChild(entry);
-            // Auto-scroll al final
-            logContainer.scrollTop = logContainer.scrollHeight;
         }
 
         // ─── PASO 4: Resultado final ───────────────────────────────────
@@ -569,27 +525,96 @@
             document.getElementById('res-total').textContent = data.total;
             document.getElementById('res-exitosas').textContent = data.exitosas;
             document.getElementById('res-fallidas').textContent = data.fallidas;
-            document.getElementById('res-tiempo').textContent = data.tiempo_total;
-            document.getElementById('btnDescargarExcel').href = `/descargar/${data.consulta_id}/resultado?formato=xlsx`;
-            document.getElementById('btnDescargarCsv').href = `/descargar/${data.consulta_id}/resultado?formato=csv`;
+            document.getElementById('res-tiempo').textContent = data.fecha_generacion || '—';
+            document.getElementById('btnDescargarExcel').href = `/descargar/${data.id}/resultado?formato=xlsx`;
+            document.getElementById('btnDescargarCsv').href = `/descargar/${data.id}/resultado?formato=csv`;
             mostrarPaso('resultado');
+        }
+
+        // ─── Reprocesar ────────────────────────────────────────────────
+        async function reprocesar(consultaId) {
+            if (!confirm('¿Reprocesar esta consulta? Se reiniciarán los contadores.')) return;
+
+            try {
+                const response = await fetch(`/reprocesar/${consultaId}`, {
+                    method: 'POST',
+                    headers: {
+                        'X-CSRF-TOKEN': csrf,
+                        'Content-Type': 'application/json',
+                    }
+                });
+
+                const data = await response.json();
+
+                if (!data.ok) {
+                    alert(data.error || 'No se pudo reprocesar.');
+                    return;
+                }
+
+                // Mostrar progreso y empezar polling
+                consultaActualId = data.consulta_id;
+                mostrarPaso('progreso');
+                document.getElementById('estado-actual').textContent = 'Reprocesando...';
+                document.getElementById('barra-progreso').style.width = '0%';
+                document.getElementById('porcentaje-progreso').textContent = '0%';
+                document.getElementById('contador-progreso').textContent = `0 / ${data.total}`;
+                iniciarPolling(data.consulta_id);
+
+            } catch (err) {
+                alert('Error de conexión: ' + err.message);
+            }
         }
 
         // ─── Error y reinicio ───────────────────────────────────────────
         function mostrarError(mensaje) {
+            if (pollingInterval) {
+                clearInterval(pollingInterval);
+                pollingInterval = null;
+            }
             document.getElementById('mensajeError').textContent = mensaje;
             mostrarPaso('error');
         }
 
         function reiniciar() {
+            if (pollingInterval) {
+                clearInterval(pollingInterval);
+                pollingInterval = null;
+            }
             archivoRuta = null;
             archivoNombre = null;
-            logEntries = 0;
+            consultaActualId = null;
             document.getElementById('barra-progreso').style.width = '0%';
             document.getElementById('nombreArchivo').classList.add('hidden');
             document.getElementById('formValidar').reset();
             mostrarPaso('subir');
         }
+
+        // ─── Auto-polling para consultas en proceso al cargar página ───
+        document.addEventListener('DOMContentLoaded', () => {
+            // Buscar filas con estado "procesando" y actualizar sus datos periódicamente
+            const rows = document.querySelectorAll('tbody tr');
+            const consultasProcesando = [];
+
+            rows.forEach(row => {
+                const estadoBadge = row.querySelector('.bg-yellow-100');
+                if (estadoBadge) {
+                    // Extraer el ID de la consulta del botón de reprocesar o del enlace de eliminar
+                    const deleteForm = row.querySelector('form[action*="consultas/"]');
+                    if (deleteForm) {
+                        const action = deleteForm.getAttribute('action');
+                        const match = action.match(/consultas\/(\d+)/);
+                        if (match) consultasProcesando.push(match[1]);
+                    }
+                }
+            });
+
+            // Auto-refrescar la página si hay consultas procesando
+            if (consultasProcesando.length > 0) {
+                setInterval(() => {
+                    location.reload();
+                }, 15000); // Refrescar cada 15 segundos
+            }
+        });
     </script>
 </body>
 </html>

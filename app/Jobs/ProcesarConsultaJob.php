@@ -18,7 +18,7 @@ class ProcesarConsultaJob implements ShouldQueue
 {
     use Dispatchable, InteractsWithQueue, Queueable, SerializesModels;
 
-    public int $timeout = 7200; // 2 horas máximo (reintentos toman más tiempo)
+    public int $timeout = 86400; // 24 horas máximo para archivos grandes
     public int $tries = 1;
 
     public function __construct(
@@ -39,6 +39,8 @@ class ProcesarConsultaJob implements ShouldQueue
         
         $scraper = null;
         $resultados = [];
+        $exitosas = 0;
+        $fallidas = 0;
 
         try {
             $scraper = new AdresScraperService();
@@ -49,10 +51,18 @@ class ProcesarConsultaJob implements ShouldQueue
                 $resultado = $scraper->consultarCedula($cedula);
                 $resultados[] = $resultado;
 
+                $esExitosa = empty($resultado['error']);
+                if ($esExitosa) {
+                    $exitosas++;
+                } else {
+                    $fallidas++;
+                }
+
+                // Actualizar progreso en BD después de cada cédula
                 $consulta->update([
                     'procesadas' => $index + 1,
-                    'exitosas' => $consulta->exitosas + (empty($resultado['error']) ? 1 : 0),
-                    'fallidas' => $consulta->fallidas + (!empty($resultado['error']) ? 1 : 0),
+                    'exitosas' => $exitosas,
+                    'fallidas' => $fallidas,
                 ]);
 
                 // Delay entre consultas para no saturar al servidor de ADRES
@@ -70,9 +80,10 @@ class ProcesarConsultaJob implements ShouldQueue
             $consulta->update([
                 'estado' => 'completado',
                 'archivo_salida' => $rutaSalida,
+                'fecha_generacion' => now(),
             ]);
 
-            Log::info("Consulta {$this->consultaId} completada exitosamente");
+            Log::info("Consulta {$this->consultaId} completada: {$exitosas} exitosas, {$fallidas} fallidas");
 
         } catch (\Exception $e) {
             Log::error("Error procesando consulta {$this->consultaId}: " . $e->getMessage());
@@ -85,6 +96,22 @@ class ProcesarConsultaJob implements ShouldQueue
             if ($scraper) {
                 $scraper->cerrar();
             }
+        }
+    }
+
+    /**
+     * Manejar el fallo del job.
+     */
+    public function failed(\Throwable $exception): void
+    {
+        Log::error("Job fallido para consulta {$this->consultaId}: " . $exception->getMessage());
+        
+        $consulta = Consulta::find($this->consultaId);
+        if ($consulta) {
+            $consulta->update([
+                'estado' => 'error',
+                'mensaje_error' => 'El proceso falló inesperadamente: ' . $exception->getMessage(),
+            ]);
         }
     }
 }

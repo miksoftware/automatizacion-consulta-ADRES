@@ -5,12 +5,10 @@ namespace App\Http\Controllers;
 use App\Imports\CedulasImport;
 use App\Exports\ResultadosExport;
 use App\Models\Consulta;
-use App\Services\AdresScraperService;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Storage;
 use Maatwebsite\Excel\Facades\Excel;
-use Symfony\Component\HttpFoundation\StreamedResponse;
 
 class ConsultaController extends Controller
 {
@@ -71,7 +69,7 @@ class ConsultaController extends Controller
         ]);
     }
 
-    public function procesar(Request $request): StreamedResponse
+    public function procesar(Request $request): JsonResponse
     {
         // Si viene de la pre-validación, usar la ruta ya guardada
         $ruta = $request->input('archivo_ruta');
@@ -94,14 +92,9 @@ class ConsultaController extends Controller
 
         if (empty($cedulas)) {
             Storage::disk('public')->delete($ruta);
-            return response()->stream(function() {
-                echo "data: " . json_encode(['tipo' => 'error', 'error' => 'No se encontraron cédulas válidas']) . "\n\n";
-                ob_flush();
-                flush();
-            }, 200, [
-                'Content-Type' => 'text/event-stream',
-                'Cache-Control' => 'no-cache',
-                'X-Accel-Buffering' => 'no',
+            return response()->json([
+                'ok' => false,
+                'error' => 'No se encontraron cédulas válidas en el archivo.',
             ]);
         }
 
@@ -110,111 +103,81 @@ class ConsultaController extends Controller
             'archivo_entrada' => $nombreOriginal,
             'archivo_entrada_path' => $ruta,
             'total_cedulas' => count($cedulas),
-            'estado' => 'procesando',
+            'estado' => 'pendiente',
         ]);
 
-        return response()->stream(function() use ($cedulas, $consulta) {
-            $scraper = null;
-            $resultados = [];
-            $tiempoInicio = microtime(true);
+        // Despachar job al queue worker (background real)
+        \App\Jobs\ProcesarConsultaJob::dispatch($consulta->id, $cedulas);
 
-            try {
-                // Enviar evento de inicio
-                $this->enviarSSE([
-                    'tipo' => 'inicio',
-                    'total' => count($cedulas),
-                    'tiempo_estimado' => $this->formatearTiempo(count($cedulas) * self::SEGUNDOS_POR_CEDULA),
-                ]);
+        return response()->json([
+            'ok' => true,
+            'consulta_id' => $consulta->id,
+            'total' => count($cedulas),
+            'tiempo_estimado' => $this->formatearTiempo(count($cedulas) * self::SEGUNDOS_POR_CEDULA),
+        ]);
+    }
 
-                $scraper = new AdresScraperService();
-                $total = count($cedulas);
-                $exitosas = 0;
-                $fallidas = 0;
+    /**
+     * Endpoint de progreso: el frontend hace polling para ver el avance.
+     */
+    public function progreso(Consulta $consulta): JsonResponse
+    {
+        return response()->json([
+            'id' => $consulta->id,
+            'estado' => $consulta->estado,
+            'total' => $consulta->total_cedulas,
+            'procesadas' => $consulta->procesadas,
+            'exitosas' => $consulta->exitosas,
+            'fallidas' => $consulta->fallidas,
+            'progreso' => $consulta->progreso,
+            'archivo_salida' => $consulta->archivo_salida,
+            'mensaje_error' => $consulta->mensaje_error,
+            'created_at' => $consulta->created_at?->format('d/m/Y H:i'),
+            'fecha_generacion' => $consulta->fecha_generacion?->format('d/m/Y H:i'),
+        ]);
+    }
 
-                foreach ($cedulas as $index => $cedula) {
-                    $tiempoInicioCedula = microtime(true);
+    /**
+     * Reprocesar una consulta que quedó atascada o falló.
+     */
+    public function reprocesar(Consulta $consulta): JsonResponse
+    {
+        // Solo reprocesar si está en error o atascada en procesando
+        if (!in_array($consulta->estado, ['error', 'procesando'])) {
+            return response()->json(['ok' => false, 'error' => 'Esta consulta no se puede reprocesar.']);
+        }
 
-                    $resultado = $scraper->consultarCedula($cedula);
-                    $resultados[] = $resultado;
+        // Verificar que el archivo original exista
+        if (!$consulta->archivo_entrada_path || !Storage::disk('public')->exists($consulta->archivo_entrada_path)) {
+            return response()->json(['ok' => false, 'error' => 'El archivo original ya no existe.']);
+        }
 
-                    $tiempoCedula = round(microtime(true) - $tiempoInicioCedula, 1);
-                    $tiempoTotal = microtime(true) - $tiempoInicio;
-                    $procesadas = $index + 1;
-                    $progreso = round(($procesadas / $total) * 100);
-                    $exito = empty($resultado['error']);
+        // Re-leer cédulas del archivo original
+        $import = new CedulasImport();
+        Excel::import($import, Storage::disk('public')->path($consulta->archivo_entrada_path));
+        $cedulas = $import->getCedulas();
 
-                    if ($exito) $exitosas++;
-                    else $fallidas++;
+        if (empty($cedulas)) {
+            return response()->json(['ok' => false, 'error' => 'No se encontraron cédulas en el archivo.']);
+        }
 
-                    // Calcular tiempo restante basado en promedio real
-                    $promedioPorCedula = $tiempoTotal / $procesadas;
-                    $restantes = $total - $procesadas;
-                    $tiempoRestante = round($restantes * $promedioPorCedula);
+        // Reset contadores
+        $consulta->update([
+            'estado' => 'pendiente',
+            'procesadas' => 0,
+            'exitosas' => 0,
+            'fallidas' => 0,
+            'mensaje_error' => null,
+            'archivo_salida' => null,
+        ]);
 
-                    $this->enviarSSE([
-                        'tipo' => 'progreso',
-                        'progreso' => $progreso,
-                        'procesadas' => $procesadas,
-                        'total' => $total,
-                        'exitosas' => $exitosas,
-                        'fallidas' => $fallidas,
-                        'cedula' => $cedula,
-                        'exito' => $exito,
-                        'nombre' => $exito ? trim(($resultado['nombres'] ?? '') . ' ' . ($resultado['apellidos'] ?? '')) : null,
-                        'eps' => $exito ? ($resultado['entidad_eps'] ?? '') : null,
-                        'error_detalle' => !$exito ? ($resultado['error'] ?? 'Error desconocido') : null,
-                        'tiempo_cedula' => $tiempoCedula,
-                        'tiempo_transcurrido' => $this->formatearTiempo(round($tiempoTotal)),
-                        'tiempo_restante' => $restantes > 0 ? $this->formatearTiempo($tiempoRestante) : 'Finalizando...',
-                    ]);
+        // Despachar job nuevamente
+        \App\Jobs\ProcesarConsultaJob::dispatch($consulta->id, $cedulas);
 
-                    // Espera breve entre consultas para no saturar ADRES
-                    if ($index < $total - 1) {
-                        sleep(1);
-                    }
-                }
-
-                // Generar archivo de salida
-                $nombreSalida = 'resultados_' . $consulta->id . '_' . now()->format('Ymd_His') . '.xlsx';
-                $rutaSalida = 'exports/' . $nombreSalida;
-                Excel::store(new ResultadosExport($resultados), $rutaSalida, 'public');
-
-                $tiempoFinal = round(microtime(true) - $tiempoInicio);
-
-                $consulta->update([
-                    'estado' => 'completado',
-                    'archivo_salida' => $rutaSalida,
-                    'procesadas' => count($cedulas),
-                    'exitosas' => $exitosas,
-                    'fallidas' => $fallidas,
-                    'fecha_generacion' => now(),
-                ]);
-
-                $this->enviarSSE([
-                    'tipo' => 'completado',
-                    'consulta_id' => $consulta->id,
-                    'exitosas' => $exitosas,
-                    'fallidas' => $fallidas,
-                    'total' => $total,
-                    'tiempo_total' => $this->formatearTiempo($tiempoFinal),
-                ]);
-
-            } catch (\Exception $e) {
-                $consulta->update(['estado' => 'error', 'mensaje_error' => $e->getMessage()]);
-
-                $this->enviarSSE([
-                    'tipo' => 'error',
-                    'error' => 'Error: ' . $e->getMessage(),
-                ]);
-            } finally {
-                if ($scraper) {
-                    $scraper->cerrar();
-                }
-            }
-        }, 200, [
-            'Content-Type' => 'text/event-stream',
-            'Cache-Control' => 'no-cache',
-            'X-Accel-Buffering' => 'no',
+        return response()->json([
+            'ok' => true,
+            'consulta_id' => $consulta->id,
+            'total' => count($cedulas),
         ]);
     }
 
@@ -275,16 +238,6 @@ class ConsultaController extends Controller
         $consulta->delete();
 
         return redirect()->route('consultas.index')->with('success', 'Registro eliminado.');
-    }
-
-    /**
-     * Envía un evento SSE al navegador.
-     */
-    protected function enviarSSE(array $data): void
-    {
-        echo "data: " . json_encode($data) . "\n\n";
-        if (ob_get_level()) ob_flush();
-        flush();
     }
 
     /**
