@@ -143,8 +143,8 @@ class ConsultaController extends Controller
      */
     public function reprocesar(Consulta $consulta): JsonResponse
     {
-        // Solo reprocesar si está en error o atascada en procesando
-        if (!in_array($consulta->estado, ['error', 'procesando'])) {
+        // Solo reprocesar si está en error, procesando o pendiente (sin worker)
+        if (!in_array($consulta->estado, ['error', 'procesando', 'pendiente'])) {
             return response()->json(['ok' => false, 'error' => 'Esta consulta no se puede reprocesar.']);
         }
 

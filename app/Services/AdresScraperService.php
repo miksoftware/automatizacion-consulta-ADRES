@@ -69,7 +69,7 @@ class AdresScraperService
                 '--ignore-certificate-errors',
             ]);
             
-            $userDataDir = '/var/www/automatizacion/storage/chrome';
+            $userDataDir = env('CHROME_USER_DATA_DIR', '/var/www/html/storage/chrome');
             if (!is_dir($userDataDir)) {
                 @mkdir($userDataDir, 0775, true);
             }
@@ -94,7 +94,7 @@ class AdresScraperService
         $capabilities->setCapability('pageLoadStrategy', 'normal');
 
         $this->driver = RemoteWebDriver::create(
-            'http://localhost:9515',
+            env('CHROMEDRIVER_URL', 'http://localhost:9515'),
             $capabilities,
             120000, // 2 minutos de timeout de conexión
             120000  // 2 minutos de timeout de request

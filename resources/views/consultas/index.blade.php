@@ -334,10 +334,10 @@
                                                     </a>
                                                 @endif
                                                 @if(Auth::user()->is_admin)
-                                                @if(in_array($c->estado, ['error', 'procesando']))
+                                                @if(in_array($c->estado, ['error', 'procesando', 'pendiente']))
                                                     <button onclick="reprocesar({{ $c->id }})" 
                                                        class="p-2 text-gray-600 hover:text-orange-600 hover:bg-orange-50 rounded" 
-                                                       title="Reprocesar">
+                                                       title="Reintentar">
                                                         <i class="fas fa-redo"></i>
                                                     </button>
                                                 @endif
