@@ -10,8 +10,6 @@ RUN apt-get update && apt-get install -y \
     libzip-dev \
     zip \
     unzip \
-    nginx \
-    supervisor \
     # Dependencias para Chrome
     wget \
     gnupg \
@@ -45,32 +43,25 @@ RUN wget -q -O - https://dl.google.com/linux/linux_signing_key.pub | gpg --dearm
 # Instalar extensiones PHP
 RUN docker-php-ext-install pdo_mysql mbstring exif pcntl bcmath gd zip
 
+# Instalar extensión Redis para PHP
+RUN pecl install redis && docker-php-ext-enable redis
+
 # Instalar Composer
 COPY --from=composer:latest /usr/bin/composer /usr/bin/composer
+
+# Instalar ChromeDriver a nivel sistema (no en vendor, para que el volumen no lo tape)
+RUN CHROME_VERSION=$(google-chrome --version | grep -oP '[\d]+\.[\d]+\.[\d]+\.[\d]+') \
+    && wget -q "https://storage.googleapis.com/chrome-for-testing-public/${CHROME_VERSION}/linux64/chromedriver-linux64.zip" -O /tmp/chromedriver.zip \
+    && unzip /tmp/chromedriver.zip -d /tmp/ \
+    && mv /tmp/chromedriver-linux64/chromedriver /usr/local/bin/chromedriver \
+    && chmod +x /usr/local/bin/chromedriver \
+    && rm -rf /tmp/chromedriver*
 
 # Directorio de trabajo
 WORKDIR /var/www/html
 
-# Copiar archivos del proyecto
-COPY . .
-
-# Instalar dependencias PHP
-RUN composer install --no-dev --optimize-autoloader
-
-# Descargar ChromeDriver compatible
-RUN php artisan dusk:chrome-driver --detect
-
-# Permisos
-RUN chown -R www-data:www-data /var/www/html \
-    && chmod -R 755 /var/www/html/storage \
-    && chmod -R 755 /var/www/html/bootstrap/cache
-
-# Copiar configuraciones
-COPY docker/nginx.conf /etc/nginx/sites-available/default
-COPY docker/supervisord.conf /etc/supervisor/conf.d/supervisord.conf
-
 # Exponer puerto
-EXPOSE 80
+EXPOSE 9000
 
-# Iniciar servicios
-CMD ["/usr/bin/supervisord", "-c", "/etc/supervisor/conf.d/supervisord.conf"]
+# Iniciar php-fpm
+CMD ["php-fpm"]
