@@ -193,11 +193,13 @@ class ConsultaController extends Controller
 
         $formato = $request->get('formato', 'xlsx');
         
+        $nombreBase = pathinfo($consulta->archivo_entrada, PATHINFO_FILENAME);
+
         if ($formato === 'csv') {
             $rutaExcel = Storage::disk('public')->path($consulta->archivo_salida);
             $spreadsheet = \PhpOffice\PhpSpreadsheet\IOFactory::load($rutaExcel);
             
-            $nombreCsv = 'resultados_adres_' . $consulta->id . '.csv';
+            $nombreCsv = $nombreBase . '.csv';
             $rutaCsv = storage_path('app/temp_' . $nombreCsv);
             
             $writer = new \PhpOffice\PhpSpreadsheet\Writer\Csv($spreadsheet);
@@ -210,7 +212,7 @@ class ConsultaController extends Controller
 
         return Storage::disk('public')->download(
             $consulta->archivo_salida,
-            'resultados_adres_' . $consulta->id . '.xlsx'
+            $nombreBase . '.xlsx'
         );
     }
 

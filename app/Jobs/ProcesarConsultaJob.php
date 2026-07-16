@@ -50,6 +50,15 @@ class ProcesarConsultaJob implements ShouldQueue
                 Log::info("Procesando cédula {$cedula} (" . ($index + 1) . "/" . count($this->cedulas) . ")");
                 
                 $resultado = $scraper->consultarCedula($cedula);
+                
+                if (!empty($resultado['error'])) {
+                    foreach (array_keys($resultado) as $key) {
+                        if ($key !== 'cedula' && $key !== 'error') {
+                            $resultado[$key] = 'SIN DATOS';
+                        }
+                    }
+                }
+
                 $resultados[] = $resultado;
 
                 $esExitosa = empty($resultado['error']);
