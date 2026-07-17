@@ -19,6 +19,7 @@ Route::middleware('auth')->group(function () {
     Route::get('/consultar', [ConsultaController::class, 'consultar'])->name('consultas.consultar');
     Route::get('/descargar/{consulta}/resultado', [ConsultaController::class, 'descargarResultado'])->name('consultas.descargar.resultado');
     Route::get('/descargar/{consulta}/original', [ConsultaController::class, 'descargarOriginal'])->name('consultas.descargar.original');
+    Route::post('/descargar/consolidado', [ConsultaController::class, 'descargarConsolidado'])->name('consultas.descargar.consolidado');
 
     // --- Solo administradores ---
     Route::middleware('admin')->group(function () {

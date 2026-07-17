@@ -4,6 +4,7 @@ namespace App\Http\Controllers;
 
 use App\Imports\CedulasImport;
 use App\Exports\ResultadosExport;
+use App\Exports\ResultadosConsolidadosExport;
 use App\Models\Consulta;
 use App\Models\Resultado;
 use Illuminate\Http\JsonResponse;
@@ -214,6 +215,67 @@ class ConsultaController extends Controller
             $consulta->archivo_salida,
             $nombreBase . '.xlsx'
         );
+    }
+
+    public function descargarConsolidado(Request $request)
+    {
+        $validated = $request->validate([
+            'consulta_ids' => 'required|array|min:1',
+            'consulta_ids.*' => 'integer|exists:consultas,id',
+        ]);
+
+        $consultaIds = collect($validated['consulta_ids'])
+            ->map(fn ($id) => (int) $id)
+            ->unique()
+            ->values();
+
+        $idsConArchivo = Consulta::query()
+            ->whereIn('id', $consultaIds)
+            ->whereNotNull('archivo_salida')
+            ->pluck('id');
+
+        if ($idsConArchivo->isEmpty()) {
+            return back()->with('error', 'Las consultas seleccionadas no tienen archivo de salida disponible.');
+        }
+
+        $resultados = Resultado::query()
+            ->with('consulta:id,archivo_entrada')
+            ->whereIn('consulta_id', $idsConArchivo)
+            ->orderBy('consulta_id')
+            ->orderBy('id')
+            ->get();
+
+        if ($resultados->isEmpty()) {
+            return back()->with('error', 'No hay resultados para exportar en las consultas seleccionadas.');
+        }
+
+        Consulta::query()
+            ->whereIn('id', $idsConArchivo)
+            ->update(['fecha_descarga' => now()]);
+
+        $filas = $resultados->map(function ($r) {
+            return [
+                'nombre_archivo' => $r->consulta->archivo_entrada ?? '—',
+                'cedula' => $r->cedula,
+                'tipo_documento' => $r->tipo_documento,
+                'nombres' => $r->nombres,
+                'apellidos' => $r->apellidos,
+                'fecha_nacimiento' => $r->fecha_nacimiento,
+                'departamento' => $r->departamento,
+                'municipio' => $r->municipio,
+                'estado' => $r->estado_afiliacion,
+                'entidad_eps' => $r->entidad_eps,
+                'regimen' => $r->regimen,
+                'fecha_afiliacion' => $r->fecha_afiliacion,
+                'fecha_finalizacion' => $r->fecha_finalizacion,
+                'tipo_afiliado' => $r->tipo_afiliado,
+                'error' => $r->error,
+            ];
+        })->toArray();
+
+        $nombre = 'resultados_consolidados_' . now()->format('Ymd_His') . '.xlsx';
+
+        return Excel::download(new ResultadosConsolidadosExport($filas), $nombre);
     }
 
     public function descargarOriginal(Consulta $consulta)

@@ -251,16 +251,37 @@
                         </div>
                     @endif
 
+                    @if(session('error'))
+                        <div class="bg-red-100 border border-red-400 text-red-700 px-4 py-3 rounded mb-4">
+                            {{ session('error') }}
+                        </div>
+                    @endif
+
                     @if($consultas->isEmpty())
                         <div class="text-center py-8 text-gray-500">
                             <i class="fas fa-inbox text-4xl mb-3"></i>
                             <p>No hay consultas registradas</p>
                         </div>
                     @else
+                        <div class="flex items-center justify-between gap-3 mb-4">
+                            <p id="contadorSeleccionadas" class="text-sm text-gray-500">0 consultas seleccionadas</p>
+                            <button type="button" id="btnDescargarSeleccionadas" disabled class="bg-green-600 hover:bg-green-700 disabled:bg-gray-300 disabled:cursor-not-allowed text-white text-sm font-medium px-4 py-2 rounded-lg transition">
+                                <i class="fas fa-file-excel mr-2"></i>Descargar seleccionadas
+                            </button>
+                        </div>
+
+                        <form id="formDescargarConsolidado" method="POST" action="{{ route('consultas.descargar.consolidado') }}" class="hidden">
+                            @csrf
+                            <div id="consultaIdsContainer"></div>
+                        </form>
+
                         <div class="overflow-x-auto">
                             <table class="min-w-full">
                                 <thead>
                                     <tr class="bg-gray-50 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
+                                        <th class="px-4 py-3 w-10">
+                                            <input type="checkbox" id="check-all-consultas" class="rounded border-gray-300 text-blue-600 focus:ring-blue-500">
+                                        </th>
                                         <th class="px-4 py-3">Archivo</th>
                                         <th class="px-4 py-3">Cédulas</th>
                                         <th class="px-4 py-3">Estado</th>
@@ -271,6 +292,15 @@
                                 <tbody class="divide-y divide-gray-200">
                                     @foreach($consultas as $c)
                                     <tr class="hover:bg-gray-50">
+                                        <td class="px-4 py-3">
+                                            <input
+                                                type="checkbox"
+                                                class="consulta-checkbox rounded border-gray-300 text-blue-600 focus:ring-blue-500"
+                                                value="{{ $c->id }}"
+                                                {{ $c->archivo_salida ? '' : 'disabled' }}
+                                                title="{{ $c->archivo_salida ? 'Seleccionar para descarga consolidada' : 'Esta consulta no tiene archivo de salida disponible' }}"
+                                            >
+                                        </td>
                                         <td class="px-4 py-3">
                                             <div class="text-sm font-medium text-gray-900 truncate max-w-[150px]" title="{{ $c->archivo_entrada }}">
                                                 {{ $c->archivo_entrada }}
@@ -622,6 +652,70 @@
 
         // ─── Auto-polling para consultas en proceso al cargar página ───
         document.addEventListener('DOMContentLoaded', () => {
+            const checkAll = document.getElementById('check-all-consultas');
+            const consultaCheckboxes = Array.from(document.querySelectorAll('.consulta-checkbox'));
+            const btnDescargarSeleccionadas = document.getElementById('btnDescargarSeleccionadas');
+            const contadorSeleccionadas = document.getElementById('contadorSeleccionadas');
+            const formDescargarConsolidado = document.getElementById('formDescargarConsolidado');
+            const consultaIdsContainer = document.getElementById('consultaIdsContainer');
+
+            const actualizarSeleccion = () => {
+                if (!consultaCheckboxes.length) return;
+
+                const habilitadas = consultaCheckboxes.filter(cb => !cb.disabled);
+                const seleccionadas = habilitadas.filter(cb => cb.checked);
+
+                if (contadorSeleccionadas) {
+                    contadorSeleccionadas.textContent = `${seleccionadas.length} consulta${seleccionadas.length === 1 ? '' : 's'} seleccionada${seleccionadas.length === 1 ? '' : 's'}`;
+                }
+
+                if (btnDescargarSeleccionadas) {
+                    btnDescargarSeleccionadas.disabled = seleccionadas.length === 0;
+                }
+
+                if (checkAll) {
+                    checkAll.checked = habilitadas.length > 0 && seleccionadas.length === habilitadas.length;
+                    checkAll.indeterminate = seleccionadas.length > 0 && seleccionadas.length < habilitadas.length;
+                }
+            };
+
+            if (checkAll) {
+                checkAll.addEventListener('change', () => {
+                    consultaCheckboxes.forEach(cb => {
+                        if (!cb.disabled) cb.checked = checkAll.checked;
+                    });
+                    actualizarSeleccion();
+                });
+            }
+
+            consultaCheckboxes.forEach(cb => cb.addEventListener('change', actualizarSeleccion));
+
+            if (btnDescargarSeleccionadas && formDescargarConsolidado && consultaIdsContainer) {
+                btnDescargarSeleccionadas.addEventListener('click', () => {
+                    const ids = consultaCheckboxes
+                        .filter(cb => cb.checked && !cb.disabled)
+                        .map(cb => cb.value);
+
+                    if (!ids.length) {
+                        alert('Selecciona al menos una consulta para descargar.');
+                        return;
+                    }
+
+                    consultaIdsContainer.innerHTML = '';
+                    ids.forEach(id => {
+                        const input = document.createElement('input');
+                        input.type = 'hidden';
+                        input.name = 'consulta_ids[]';
+                        input.value = id;
+                        consultaIdsContainer.appendChild(input);
+                    });
+
+                    formDescargarConsolidado.submit();
+                });
+            }
+
+            actualizarSeleccion();
+
             // Buscar filas con estado "procesando" y actualizar sus datos periódicamente
             const rows = document.querySelectorAll('tbody tr');
             const consultasProcesando = [];
