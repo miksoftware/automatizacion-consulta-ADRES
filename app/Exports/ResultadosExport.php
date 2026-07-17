@@ -26,22 +26,33 @@ class ResultadosExport implements FromArray, WithHeadings, WithStyles
             }
 
             return [
-                $item['cedula'] ?? '',
-                $item['tipo_documento'] ?? 'CC',
-                $item['nombres'] ?? '',
-                $item['apellidos'] ?? '',
-                $item['fecha_nacimiento'] ?? '',
-                $item['departamento'] ?? '',
-                $item['municipio'] ?? '',
-                $item['estado'] ?? '',
-                $item['entidad_eps'] ?? '',
-                $item['regimen'] ?? '',
-                $item['fecha_afiliacion'] ?? '',
-                $item['fecha_finalizacion'] ?? '',
-                $item['tipo_afiliado'] ?? '',
-                $error,
+                $this->valorOTexto($item['cedula'] ?? null),
+                $this->valorOTexto($item['tipo_documento'] ?? 'CC'),
+                $this->valorOTexto($item['nombres'] ?? null),
+                $this->valorOTexto($item['apellidos'] ?? null),
+                $this->valorOTexto($item['fecha_nacimiento'] ?? null),
+                $this->valorOTexto($item['departamento'] ?? null),
+                $this->valorOTexto($item['municipio'] ?? null),
+                $this->valorOTexto($item['estado'] ?? null),
+                $this->valorOTexto($item['entidad_eps'] ?? null),
+                $this->valorOTexto($item['regimen'] ?? null),
+                $this->valorOTexto($item['fecha_afiliacion'] ?? null),
+                $this->valorOTexto($item['fecha_finalizacion'] ?? null),
+                $this->valorOTexto($item['tipo_afiliado'] ?? null),
+                $this->valorOTexto($error),
             ];
         }, $this->resultados);
+    }
+
+    protected function valorOTexto(mixed $valor): string
+    {
+        if ($valor === null) {
+            return 'SIN DATOS';
+        }
+
+        $texto = trim((string) $valor);
+
+        return $texto === '' ? 'SIN DATOS' : $texto;
     }
 
     public function headings(): array

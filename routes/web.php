@@ -20,6 +20,7 @@ Route::middleware('auth')->group(function () {
     Route::get('/descargar/{consulta}/resultado', [ConsultaController::class, 'descargarResultado'])->name('consultas.descargar.resultado');
     Route::get('/descargar/{consulta}/original', [ConsultaController::class, 'descargarOriginal'])->name('consultas.descargar.original');
     Route::post('/descargar/consolidado', [ConsultaController::class, 'descargarConsolidado'])->name('consultas.descargar.consolidado');
+    Route::post('/descargar/consolidado/eps', [ConsultaController::class, 'descargarConsolidadoPorEps'])->name('consultas.descargar.consolidado.eps');
 
     // --- Solo administradores ---
     Route::middleware('admin')->group(function () {

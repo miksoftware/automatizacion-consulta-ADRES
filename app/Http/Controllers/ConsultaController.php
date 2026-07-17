@@ -9,7 +9,9 @@ use App\Models\Consulta;
 use App\Models\Resultado;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
+use Illuminate\Support\Collection;
 use Illuminate\Support\Facades\Storage;
+use Illuminate\Support\Str;
 use Maatwebsite\Excel\Facades\Excel;
 
 class ConsultaController extends Controller
@@ -22,7 +24,10 @@ class ConsultaController extends Controller
     public function index()
     {
         $consultas = Consulta::orderBy('created_at', 'desc')->paginate(15);
-        return view('consultas.index', compact('consultas'));
+
+        $epsOpciones = $this->obtenerOpcionesEps();
+
+        return view('consultas.index', compact('consultas', 'epsOpciones'));
     }
 
     /**
@@ -278,6 +283,83 @@ class ConsultaController extends Controller
         return Excel::download(new ResultadosConsolidadosExport($filas), $nombre);
     }
 
+    public function descargarConsolidadoPorEps(Request $request)
+    {
+        $validated = $request->validate([
+            'eps_key' => 'required|string|max:255',
+            'consulta_ids' => 'nullable|array',
+            'consulta_ids.*' => 'integer|exists:consultas,id',
+        ]);
+
+        $epsKey = $this->normalizarEps($validated['eps_key']);
+        if (!$epsKey) {
+            return back()->with('error', 'Debes seleccionar una EPS valida.');
+        }
+
+        $consultaIds = collect($validated['consulta_ids'] ?? [])
+            ->map(fn ($id) => (int) $id)
+            ->unique()
+            ->values();
+
+        $query = Resultado::query()
+            ->with('consulta:id,archivo_entrada')
+            ->whereNotNull('entidad_eps')
+            ->where('entidad_eps', '!=', '');
+
+        if ($consultaIds->isNotEmpty()) {
+            $idsConArchivo = Consulta::query()
+                ->whereIn('id', $consultaIds)
+                ->whereNotNull('archivo_salida')
+                ->pluck('id');
+
+            if ($idsConArchivo->isEmpty()) {
+                return back()->with('error', 'Las consultas seleccionadas no tienen archivo de salida disponible.');
+            }
+
+            $query->whereIn('consulta_id', $idsConArchivo);
+        }
+
+        $resultados = $query
+            ->orderBy('consulta_id')
+            ->orderBy('id')
+            ->get()
+            ->filter(fn ($r) => $this->normalizarEps($r->entidad_eps) === $epsKey)
+            ->values();
+
+        if ($resultados->isEmpty()) {
+            return back()->with('error', 'No hay resultados para la EPS seleccionada con el filtro actual.');
+        }
+
+        $consultaIdsDescargadas = $resultados->pluck('consulta_id')->unique();
+        Consulta::query()
+            ->whereIn('id', $consultaIdsDescargadas)
+            ->update(['fecha_descarga' => now()]);
+
+        $filas = $resultados->map(function ($r) {
+            return [
+                'nombre_archivo' => $r->consulta->archivo_entrada ?? '—',
+                'cedula' => $r->cedula,
+                'tipo_documento' => $r->tipo_documento,
+                'nombres' => $r->nombres,
+                'apellidos' => $r->apellidos,
+                'fecha_nacimiento' => $r->fecha_nacimiento,
+                'departamento' => $r->departamento,
+                'municipio' => $r->municipio,
+                'estado' => $r->estado_afiliacion,
+                'entidad_eps' => $r->entidad_eps,
+                'regimen' => $r->regimen,
+                'fecha_afiliacion' => $r->fecha_afiliacion,
+                'fecha_finalizacion' => $r->fecha_finalizacion,
+                'tipo_afiliado' => $r->tipo_afiliado,
+                'error' => $r->error,
+            ];
+        })->toArray();
+
+        $nombre = 'resultados_eps_' . Str::slug($epsKey, '_') . '_' . now()->format('Ymd_His') . '.xlsx';
+
+        return Excel::download(new ResultadosConsolidadosExport($filas), $nombre);
+    }
+
     public function descargarOriginal(Consulta $consulta)
     {
         if (!$consulta->archivo_entrada_path || !Storage::disk('public')->exists($consulta->archivo_entrada_path)) {
@@ -378,5 +460,62 @@ class ConsultaController extends Controller
         if ($segs > 0 && $horas === 0) $partes[] = $segs . ' seg';
 
         return implode(' ', $partes);
+    }
+
+    protected function obtenerOpcionesEps(): Collection
+    {
+        $epsUnicas = Resultado::query()
+            ->whereNotNull('entidad_eps')
+            ->where('entidad_eps', '!=', '')
+            ->pluck('entidad_eps')
+            ->map(fn ($v) => trim((string) $v))
+            ->filter()
+            ->unique();
+
+        $grupos = [];
+        foreach ($epsUnicas as $eps) {
+            $key = $this->normalizarEps($eps);
+            if (!$key) {
+                continue;
+            }
+
+            if (!isset($grupos[$key])) {
+                $grupos[$key] = [];
+            }
+
+            $grupos[$key][] = $eps;
+        }
+
+        $opciones = collect($grupos)->map(function (array $variantes, string $key) {
+            $variantes = array_values(array_unique($variantes));
+            usort($variantes, fn ($a, $b) => strlen($a) <=> strlen($b) ?: strcmp($a, $b));
+
+            return [
+                'key' => $key,
+                'label' => $variantes[0] ?? $key,
+                'variantes' => $variantes,
+            ];
+        });
+
+        return $opciones->sortBy('label', SORT_NATURAL | SORT_FLAG_CASE)->values();
+    }
+
+    protected function normalizarEps(?string $eps): ?string
+    {
+        if ($eps === null) {
+            return null;
+        }
+
+        $texto = trim($eps);
+        if ($texto === '') {
+            return null;
+        }
+
+        $texto = Str::of($texto)->ascii()->upper()->value();
+        $texto = preg_replace('/[^A-Z0-9]+/', ' ', $texto);
+        $texto = preg_replace('/\bCM\b/', ' ', $texto);
+        $texto = preg_replace('/\s+/', ' ', trim($texto));
+
+        return $texto !== '' ? $texto : null;
     }
 }

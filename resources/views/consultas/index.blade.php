@@ -270,9 +270,33 @@
                             </button>
                         </div>
 
+                        <div class="grid grid-cols-1 md:grid-cols-[1fr_auto] gap-3 mb-4">
+                            <select id="selectEpsConsolidado" class="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent">
+                                <option value="">Selecciona una EPS para descargar consolidado</option>
+                                @foreach($epsOpciones as $eps)
+                                    <option value="{{ $eps['key'] }}">
+                                        {{ $eps['label'] }}@if(count($eps['variantes']) > 1) ({{ count($eps['variantes']) }} variantes)@endif
+                                    </option>
+                                @endforeach
+                            </select>
+                            <button type="button" id="btnDescargarPorEps" class="bg-blue-600 hover:bg-blue-700 text-white text-sm font-medium px-4 py-2 rounded-lg transition whitespace-nowrap">
+                                <i class="fas fa-filter mr-2"></i>Descargar por EPS
+                            </button>
+                        </div>
+
+                        <p class="text-xs text-gray-500 mb-4">
+                            Si marcas consultas, se filtra por esas. Si no marcas ninguna, se toma la EPS en todos los archivos disponibles.
+                        </p>
+
                         <form id="formDescargarConsolidado" method="POST" action="{{ route('consultas.descargar.consolidado') }}" class="hidden">
                             @csrf
                             <div id="consultaIdsContainer"></div>
+                        </form>
+
+                        <form id="formDescargarConsolidadoEps" method="POST" action="{{ route('consultas.descargar.consolidado.eps') }}" class="hidden">
+                            @csrf
+                            <input type="hidden" id="epsKeyInput" name="eps_key" value="">
+                            <div id="consultaIdsEpsContainer"></div>
                         </form>
 
                         <div class="overflow-x-auto">
@@ -658,6 +682,29 @@
             const contadorSeleccionadas = document.getElementById('contadorSeleccionadas');
             const formDescargarConsolidado = document.getElementById('formDescargarConsolidado');
             const consultaIdsContainer = document.getElementById('consultaIdsContainer');
+            const selectEpsConsolidado = document.getElementById('selectEpsConsolidado');
+            const btnDescargarPorEps = document.getElementById('btnDescargarPorEps');
+            const formDescargarConsolidadoEps = document.getElementById('formDescargarConsolidadoEps');
+            const epsKeyInput = document.getElementById('epsKeyInput');
+            const consultaIdsEpsContainer = document.getElementById('consultaIdsEpsContainer');
+
+            const obtenerIdsSeleccionados = () => {
+                return consultaCheckboxes
+                    .filter(cb => cb.checked && !cb.disabled)
+                    .map(cb => cb.value);
+            };
+
+            const llenarInputsIds = (container, ids) => {
+                if (!container) return;
+                container.innerHTML = '';
+                ids.forEach(id => {
+                    const input = document.createElement('input');
+                    input.type = 'hidden';
+                    input.name = 'consulta_ids[]';
+                    input.value = id;
+                    container.appendChild(input);
+                });
+            };
 
             const actualizarSeleccion = () => {
                 if (!consultaCheckboxes.length) return;
@@ -692,25 +739,32 @@
 
             if (btnDescargarSeleccionadas && formDescargarConsolidado && consultaIdsContainer) {
                 btnDescargarSeleccionadas.addEventListener('click', () => {
-                    const ids = consultaCheckboxes
-                        .filter(cb => cb.checked && !cb.disabled)
-                        .map(cb => cb.value);
+                    const ids = obtenerIdsSeleccionados();
 
                     if (!ids.length) {
                         alert('Selecciona al menos una consulta para descargar.');
                         return;
                     }
 
-                    consultaIdsContainer.innerHTML = '';
-                    ids.forEach(id => {
-                        const input = document.createElement('input');
-                        input.type = 'hidden';
-                        input.name = 'consulta_ids[]';
-                        input.value = id;
-                        consultaIdsContainer.appendChild(input);
-                    });
+                    llenarInputsIds(consultaIdsContainer, ids);
 
                     formDescargarConsolidado.submit();
+                });
+            }
+
+            if (btnDescargarPorEps && selectEpsConsolidado && formDescargarConsolidadoEps && epsKeyInput && consultaIdsEpsContainer) {
+                btnDescargarPorEps.addEventListener('click', () => {
+                    const epsKey = (selectEpsConsolidado.value || '').trim();
+                    if (!epsKey) {
+                        alert('Selecciona una EPS para descargar el consolidado.');
+                        return;
+                    }
+
+                    const ids = obtenerIdsSeleccionados();
+                    epsKeyInput.value = epsKey;
+                    llenarInputsIds(consultaIdsEpsContainer, ids);
+
+                    formDescargarConsolidadoEps.submit();
                 });
             }
 
